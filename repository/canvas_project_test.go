@@ -1,12 +1,71 @@
 package repository
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/basketikun/infinite-canvas/model"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+func TestDBUsesPostgresAndMigratesCanvasProjects(t *testing.T) {
+	useRepositoryTestDB(t, newRepositoryTestConfig(t, "postgres_dialector"))
+
+	database, err := DB()
+	if err != nil {
+		t.Fatalf("DB() error = %v", err)
+	}
+	if got := database.Dialector.Name(); got != "postgres" {
+		t.Fatalf("database dialector = %q, want postgres", got)
+	}
+	if !database.Migrator().HasTable(&model.CanvasProject{}) {
+		t.Fatal("DB() did not migrate canvas_projects")
+	}
+}
+
+func TestCanvasProjectDocumentRoundTripsThroughPostgresRepository(t *testing.T) {
+	useRepositoryTestDB(t, newRepositoryTestConfig(t, "canvas_document_round_trip"))
+	document := model.CanvasProjectDocument(`{
+		"nodes":[{"id":"image-1","type":"image","data":{"label":"海报","width":1024}}],
+		"edges":[],
+		"viewport":{"x":12.5,"y":-8,"zoom":1.25}
+	}`)
+	_, inserted, err := CreateCanvasProject(model.CanvasProject{
+		ID:        "round-trip-project",
+		OwnerUID:  "round-trip-owner",
+		Title:     "文档往返测试",
+		Document:  document,
+		Revision:  7,
+		CreatedAt: "2026-09-05T01:00:00Z",
+		UpdatedAt: "2026-09-05T01:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("CreateCanvasProject() error = %v", err)
+	}
+	if !inserted {
+		t.Fatal("CreateCanvasProject() inserted = false, want true")
+	}
+	stored, found, err := GetCanvasProject("round-trip-owner", "round-trip-project")
+	if err != nil {
+		t.Fatalf("GetCanvasProject() error = %v", err)
+	}
+	if !found {
+		t.Fatal("GetCanvasProject() found = false, want true")
+	}
+	var expectedDocument any
+	if err := json.Unmarshal(document, &expectedDocument); err != nil {
+		t.Fatalf("test document is not valid JSON: %v", err)
+	}
+	var storedDocument any
+	if err := json.Unmarshal(stored.Document, &storedDocument); err != nil {
+		t.Fatalf("stored document is not valid JSON: %v", err)
+	}
+	if !reflect.DeepEqual(storedDocument, expectedDocument) {
+		t.Fatalf("stored document = %s, want JSON-equivalent %s", stored.Document, document)
+	}
+}
 
 func useLegacyCanvasProjectTestDB(t *testing.T) {
 	t.Helper()
