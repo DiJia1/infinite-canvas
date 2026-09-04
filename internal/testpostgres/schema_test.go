@@ -1,6 +1,9 @@
 package testpostgres
 
 import (
+	"database/sql"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
 
@@ -25,6 +28,11 @@ func TestNewSchemaIsolatesAndDropsSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstSQLDB, err := firstDB.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = firstSQLDB.Close() })
 	if err := firstDB.Exec("CREATE TABLE test_only_items (id integer primary key)").Error; err != nil {
 		t.Fatal(err)
 	}
@@ -33,8 +41,42 @@ func TestNewSchemaIsolatesAndDropsSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	secondSQLDB, err := secondDB.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = secondSQLDB.Close() })
 	if secondDB.Migrator().HasTable("test_only_items") {
 		t.Fatal("schemas leaked test table")
+	}
+
+	if err := firstSQLDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := secondSQLDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	adminDB, err := sql.Open("pgx", os.Getenv("TEST_DATABASE_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = adminDB.Close() })
+	for _, schema := range []*Schema{first, second} {
+		schemaName := schemaNameFromDSN(t, schema.DSN)
+		var exists bool
+		if err := adminDB.QueryRow("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)", schemaName).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists {
+			t.Fatalf("test schema %q was not dropped", schemaName)
+		}
 	}
 }
 
@@ -49,4 +91,17 @@ func TestNewSchemaRequiresTestDatabaseDSN(t *testing.T) {
 	if !strings.Contains(err.Error(), "TEST_DATABASE_DSN") {
 		t.Fatalf("NewSchema error %q does not identify TEST_DATABASE_DSN", err)
 	}
+}
+
+func schemaNameFromDSN(t *testing.T, dsn string) string {
+	t.Helper()
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemaName := parsed.Query().Get("search_path")
+	if schemaName == "" {
+		t.Fatal("schema DSN is missing search_path")
+	}
+	return schemaName
 }

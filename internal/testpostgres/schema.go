@@ -47,6 +47,11 @@ func NewSchema(prefix string) (*Schema, error) {
 		return nil, fmt.Errorf("create test schema: %w", err)
 	}
 	if err := db.Close(); err != nil {
+		cleanupDB, cleanupErr := sql.Open("pgx", testDatabaseDSN)
+		if cleanupErr == nil {
+			_, _ = cleanupDB.Exec("DROP SCHEMA " + quoteIdentifier(name) + " CASCADE")
+			_ = cleanupDB.Close()
+		}
 		return nil, fmt.Errorf("close test schema connection: %w", err)
 	}
 
