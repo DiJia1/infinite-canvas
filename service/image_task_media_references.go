@@ -47,8 +47,14 @@ func readImageTaskMediaReferences(ctx context.Context, user PortalUser, mediaIDs
 		if err != nil {
 			return nil, err
 		}
-		if !canAccessMedia(user, item) && !isPublic {
-			return nil, safeMessageError{message: "无权使用该参考图片"}
+		if !isPublic {
+			allowed, err := canAccessMedia(ctx, user, item)
+			if err != nil {
+				return nil, err
+			}
+			if !allowed {
+				return nil, safeMessageError{message: "无权使用该参考图片"}
+			}
 		}
 		reader, err := store.Get(ctx, item.ObjectKey)
 		if err != nil {

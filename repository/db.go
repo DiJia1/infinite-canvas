@@ -54,6 +54,8 @@ func DB() (*gorm.DB, error) {
 			&model.PublicImage{},
 			&model.Setting{},
 			&model.PortalMember{},
+			&model.AppMemberRole{},
+			&model.AppRBACState{},
 			&model.OperationLog{},
 		)
 	})

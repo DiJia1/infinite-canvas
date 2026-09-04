@@ -35,7 +35,6 @@ func TestMain(m *testing.M) {
 	config.Cfg = config.Config{
 		StorageDriver:                  "sqlite",
 		DatabaseDSN:                    filepath.Join(directory, "canvas.db"),
-		PortalAdminRole:                "portal-admin",
 		MediaStorage:                   "local",
 		MediaLocalDir:                  directory,
 		CanvasSaveSuccessLogSampleRate: 1,
@@ -43,6 +42,253 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = os.RemoveAll(directory)
 	os.Exit(code)
+}
+
+func grantLocalAppRole(t *testing.T, userUID string, role model.AppRole, enabled bool) {
+	t.Helper()
+	if err := repository.UpsertPortalMembers([]model.PortalMember{{
+		UserUID: userUID, DisplayName: userUID, Enabled: enabled, Roles: []string{}, SyncedAt: time.Now().UTC(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SetAppRole(userUID, role, "test-grantor"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func requestWithPortalHeaders(method, path, userUID, roles string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, path, nil)
+	request.Header.Set("X-Portal-User-Uid", userUID)
+	if roles != "" {
+		request.Header.Set("X-Portal-Roles", roles)
+	}
+	response := httptest.NewRecorder()
+	New().ServeHTTP(response, request)
+	return response
+}
+
+func requestAppRoleChange(userUID, targetUID string, role model.AppRole, extraJSON string) *httptest.ResponseRecorder {
+	body := fmt.Sprintf(`{"appRole":%q%s}`, role, extraJSON)
+	request := httptest.NewRequest(http.MethodPatch, "/api/admin/members/"+targetUID+"/app-role", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Portal-User-Uid", userUID)
+	response := httptest.NewRecorder()
+	New().ServeHTTP(response, request)
+	return response
+}
+
+func TestAdminSetsApplicationRoleAndAuditsIt(t *testing.T) {
+	const adminUID = "role-route-admin"
+	const targetUID = "role-route-target"
+	grantLocalAppRole(t, adminUID, model.AppRoleAdmin, true)
+	if err := repository.UpsertPortalMembers([]model.PortalMember{{
+		UserUID: targetUID, DisplayName: "真实目标姓名", Enabled: true, Roles: []string{"Portal 设计师"}, SyncedAt: time.Now().UTC(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		response := requestAppRoleChange(adminUID, targetUID, model.AppRolePublicAssetsManager, `,"actorUid":"spoofed-actor","targetName":"伪造姓名"`)
+		var payload struct {
+			Code int `json:"code"`
+			Data struct {
+				UserUID     string        `json:"userUid"`
+				DisplayName string        `json:"displayName"`
+				Roles       []string      `json:"roles"`
+				AppRole     model.AppRole `json:"appRole"`
+			} `json:"data"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &payload) != nil || payload.Code != 0 {
+			t.Fatalf("attempt %d status/body = %d/%s", attempt+1, response.Code, response.Body.String())
+		}
+		if payload.Data.UserUID != targetUID || payload.Data.DisplayName != "真实目标姓名" || payload.Data.AppRole != model.AppRolePublicAssetsManager {
+			t.Fatalf("changed member = %+v", payload.Data)
+		}
+		if len(payload.Data.Roles) != 1 || payload.Data.Roles[0] != "Portal 设计师" {
+			t.Fatalf("Portal roles changed with app role: %#v", payload.Data.Roles)
+		}
+	}
+
+	items, _, err := repository.ListOperationLogs(model.OperationLogQuery{Action: "member_app_role_change", Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matching := 0
+	for _, item := range items {
+		if item.TargetID != targetUID {
+			continue
+		}
+		matching++
+		if item.ActorUID != adminUID || item.TargetType != "portal_member" || item.TargetName != "真实目标姓名" || item.Status != model.OperationStatusSuccess {
+			t.Fatalf("role audit = %+v", item)
+		}
+		if item.RequestSummary != `{"appRole":"public_assets_manager"}` {
+			t.Fatalf("role audit request summary = %q, want validated resulting role", item.RequestSummary)
+		}
+	}
+	if matching != 2 {
+		t.Fatalf("matching role audit count = %d, want one per successful idempotent request; logs=%+v", matching, items)
+	}
+
+	database, err := repository.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assignment model.AppMemberRole
+	if err := database.Where("user_uid = ?", targetUID).First(&assignment).Error; err != nil {
+		t.Fatal(err)
+	}
+	if assignment.GrantedByUID != adminUID {
+		t.Fatalf("grantedByUid = %q, want %q", assignment.GrantedByUID, adminUID)
+	}
+}
+
+func TestRoleChangeRejectsOnlyEnabledAdminDemotionWhenAnotherAssignmentIsDisabled(t *testing.T) {
+	database, err := repository.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Where("role = ?", model.AppRoleAdmin).Delete(&model.AppMemberRole{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	const enabledAdminUID = "role-route-enabled-last-admin"
+	const disabledAdminUID = "role-route-disabled-explicit-admin"
+	grantLocalAppRole(t, enabledAdminUID, model.AppRoleAdmin, true)
+	grantLocalAppRole(t, disabledAdminUID, model.AppRoleAdmin, true)
+	if err := repository.UpsertPortalMembers([]model.PortalMember{{
+		UserUID: disabledAdminUID, DisplayName: disabledAdminUID, Enabled: false, Roles: []string{}, SyncedAt: time.Now().UTC(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := requestAppRoleChange(enabledAdminUID, enabledAdminUID, model.AppRoleMember, "")
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":1`) || !strings.Contains(response.Body.String(), `"data":null`) {
+		t.Fatalf("last enabled admin status/body = %d/%s, want HTTP 409 JSON envelope", response.Code, response.Body.String())
+	}
+	if role, err := repository.ResolveAppRole(enabledAdminUID); err != nil || role != model.AppRoleAdmin {
+		t.Fatalf("enabled administrator role = %q, err=%v; want unchanged admin", role, err)
+	}
+}
+
+func TestRoleChangeRejectsInvalidTargetsLastAdminDemotionAndNonAdmins(t *testing.T) {
+	database, err := repository.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Where("role = ?", model.AppRoleAdmin).Delete(&model.AppMemberRole{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	const adminUID = "role-route-only-admin"
+	const enabledUID = "role-route-enabled-target"
+	const disabledUID = "role-route-disabled-target"
+	const managerUID = "role-route-manager"
+	const memberUID = "role-route-member"
+	grantLocalAppRole(t, adminUID, model.AppRoleAdmin, true)
+	grantLocalAppRole(t, managerUID, model.AppRolePublicAssetsManager, true)
+	grantLocalAppRole(t, memberUID, model.AppRoleMember, true)
+	if err := repository.UpsertPortalMembers([]model.PortalMember{
+		{UserUID: enabledUID, DisplayName: enabledUID, Enabled: true, Roles: []string{}},
+		{UserUID: disabledUID, DisplayName: disabledUID, Enabled: false, Roles: []string{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name      string
+		targetUID string
+		role      model.AppRole
+	}{
+		{name: "invalid role", targetUID: enabledUID, role: model.AppRole("owner")},
+		{name: "disabled target", targetUID: disabledUID, role: model.AppRoleAdmin},
+		{name: "missing target", targetUID: "role-route-missing-target", role: model.AppRoleAdmin},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := requestAppRoleChange(adminUID, test.targetUID, test.role, "")
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":1`) || !strings.Contains(response.Body.String(), `"data":null`) {
+				t.Fatalf("status/body = %d/%s, want HTTP 400 JSON envelope", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	conflict := requestAppRoleChange(adminUID, adminUID, model.AppRoleMember, "")
+	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), `"code":1`) || !strings.Contains(conflict.Body.String(), `"data":null`) {
+		t.Fatalf("last-admin status/body = %d/%s, want HTTP 409 JSON envelope", conflict.Code, conflict.Body.String())
+	}
+	if role, err := repository.ResolveAppRole(adminUID); err != nil || role != model.AppRoleAdmin {
+		t.Fatalf("last administrator role = %q, err=%v", role, err)
+	}
+
+	for _, callerUID := range []string{managerUID, memberUID} {
+		response := requestAppRoleChange(callerUID, enabledUID, model.AppRoleAdmin, "")
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("caller %q status/body = %d/%s, want forbidden", callerUID, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestGatewayAdminRoleAloneDoesNotGrantLocalAdmin(t *testing.T) {
+	const userUID = "gateway-admin-only-router"
+	grantLocalAppRole(t, userUID, model.AppRoleMember, true)
+	response := requestWithPortalHeaders(http.MethodGet, "/api/admin/me", userUID, "portal-admin")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body = %s", response.Code, http.StatusForbidden, response.Body.String())
+	}
+}
+
+func TestLegacyGatewayRolesNeverGrantLocalPrivileges(t *testing.T) {
+	const userUID = "legacy-gateway-role-only-member"
+	grantLocalAppRole(t, userUID, model.AppRoleMember, true)
+
+	admin := requestWithPortalHeaders(http.MethodGet, "/api/admin/me", userUID, "portal-admin")
+	if admin.Code != http.StatusForbidden {
+		t.Fatalf("legacy Gateway admin role status = %d, want %d; body = %s", admin.Code, http.StatusForbidden, admin.Body.String())
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/public-folders", strings.NewReader(`{"title":"旧 Gateway 角色无权创建"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Portal-User-Uid", userUID)
+	request.Header.Set("X-Portal-Roles", "portal-public-assets-manager,portal-admin")
+	publicAssets := httptest.NewRecorder()
+	New().ServeHTTP(publicAssets, request)
+	if publicAssets.Code != http.StatusForbidden {
+		t.Fatalf("legacy Gateway public-assets role status = %d, want %d; body = %s", publicAssets.Code, http.StatusForbidden, publicAssets.Body.String())
+	}
+}
+
+func TestLocalPublicAssetsManagerWritesOnlyPublicAssets(t *testing.T) {
+	const userUID = "local-public-assets-manager-router"
+	grantLocalAppRole(t, userUID, model.AppRolePublicAssetsManager, true)
+
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/public-folders", strings.NewReader(`{"title":"本地素材管理员目录"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Portal-User-Uid", userUID)
+	publicAssets := httptest.NewRecorder()
+	New().ServeHTTP(publicAssets, request)
+	if publicAssets.Code != http.StatusOK {
+		t.Fatalf("public-assets status = %d, want %d; body = %s", publicAssets.Code, http.StatusOK, publicAssets.Body.String())
+	}
+
+	admin := requestWithPortalHeaders(http.MethodGet, "/api/admin/settings", userUID, "")
+	if admin.Code != http.StatusForbidden {
+		t.Fatalf("admin status = %d, want %d; body = %s", admin.Code, http.StatusForbidden, admin.Body.String())
+	}
+}
+
+func TestLocalAdminMediaAccessesCrossUserPrivateMedia(t *testing.T) {
+	const adminUID = "local-admin-cross-user-media"
+	grantLocalAppRole(t, adminUID, model.AppRoleAdmin, true)
+	item := model.Media{
+		ID: "local-admin-cross-user-private-media", OwnerUID: "different-media-owner",
+		ObjectKey: "images/private/different-media-owner/admin-access.png", ContentType: "image/png",
+	}
+	if _, err := repository.SaveMedia(item); err != nil {
+		t.Fatal(err)
+	}
+
+	response := requestWithPortalHeaders(http.MethodGet, "/api/v1/media/"+item.ID+"/access", adminUID, "member")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":0`) {
+		t.Fatalf("local-admin media access = %d/%s", response.Code, response.Body.String())
+	}
 }
 
 func TestPrivateMediaDeleteRouteIsProtected(t *testing.T) {
@@ -502,15 +748,18 @@ func TestPrivateImageCatalogPersistsFolderMoveAndRenamePerOwner(t *testing.T) {
 }
 
 func TestOperationLogRouteIsAdminOnly(t *testing.T) {
+	const adminUID = "operation-log-route-admin"
 	request := httptest.NewRequest(http.MethodGet, "/api/admin/operation-logs", nil)
-	request.Header.Set("X-Portal-User-Uid", "member")
+	request.Header.Set("X-Portal-User-Uid", "operation-log-route-member")
 	response := httptest.NewRecorder()
 	New().ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("non-admin status = %d, want %d; body = %s", response.Code, http.StatusForbidden, response.Body.String())
 	}
 
-	request.Header.Set("X-Portal-Roles", "portal-admin")
+	grantLocalAppRole(t, adminUID, model.AppRoleAdmin, true)
+	request = httptest.NewRequest(http.MethodGet, "/api/admin/operation-logs", nil)
+	request.Header.Set("X-Portal-User-Uid", adminUID)
 	response = httptest.NewRecorder()
 	New().ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -519,6 +768,7 @@ func TestOperationLogRouteIsAdminOnly(t *testing.T) {
 }
 
 func TestStatisticsRouteIsAdminOnlyAndReturnsRangeAndUserBreakdown(t *testing.T) {
+	const adminUID = "statistics-admin"
 	stamp := time.Now().UTC().Format("20060102150405.000000000")
 	if _, _, err := repository.CreateImageGenerationTask(model.ImageGenerationTask{
 		ID: "statistics-" + stamp, OwnerUID: "statistics-user", ClientRequestID: "statistics-" + stamp,
@@ -537,8 +787,8 @@ func TestStatisticsRouteIsAdminOnlyAndReturnsRangeAndUserBreakdown(t *testing.T)
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/api/admin/statistics?start="+time.Now().In(time.FixedZone("CST", 8*60*60)).Format("2006-01-02")+"&end="+time.Now().In(time.FixedZone("CST", 8*60*60)).Format("2006-01-02"), nil)
-	request.Header.Set("X-Portal-User-Uid", "statistics-admin")
-	request.Header.Set("X-Portal-Roles", "portal-admin")
+	grantLocalAppRole(t, adminUID, model.AppRoleAdmin, true)
+	request.Header.Set("X-Portal-User-Uid", adminUID)
 	response := httptest.NewRecorder()
 	New().ServeHTTP(response, request)
 	var payload struct {
@@ -576,6 +826,7 @@ func TestStatisticsRouteIsAdminOnlyAndReturnsRangeAndUserBreakdown(t *testing.T)
 }
 
 func TestPortalMemberListRouteIsAdminOnlyAndReturnsSynchronizedMembers(t *testing.T) {
+	const adminUID = "member-list-admin"
 	memberID := "member-list-" + time.Now().Format("20060102150405.000000000")
 	if err := repository.UpsertPortalMembers([]model.PortalMember{{
 		UserUID:     memberID,
@@ -596,8 +847,8 @@ func TestPortalMemberListRouteIsAdminOnlyAndReturnsSynchronizedMembers(t *testin
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/api/admin/members?query=%E6%88%90%E5%91%98", nil)
-	request.Header.Set("X-Portal-User-Uid", "member-list-admin")
-	request.Header.Set("X-Portal-Roles", "portal-admin")
+	grantLocalAppRole(t, adminUID, model.AppRoleAdmin, true)
+	request.Header.Set("X-Portal-User-Uid", adminUID)
 	response := httptest.NewRecorder()
 	New().ServeHTTP(response, request)
 	var payload struct {
@@ -620,6 +871,7 @@ func TestPortalMemberListRouteIsAdminOnlyAndReturnsSynchronizedMembers(t *testin
 
 func TestPortalDirectoryCallbackSynchronizesAndDisablesMember(t *testing.T) {
 	const userUID = "2b5892c4-3dd2-4f82-8644-f0d14a0b5e71"
+	const adminUID = "directory-admin"
 	users := []string{`{"userUid":"` + userUID + `","displayName":"李小明","enabled":true,"roles":["设计师"]}`}
 	directory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Portal-Service-Key") != "infinite-canvas" || r.Header.Get("X-Portal-Service-Secret") != "directory-secret" {
@@ -659,8 +911,8 @@ func TestPortalDirectoryCallbackSynchronizesAndDisablesMember(t *testing.T) {
 	}
 
 	manual := httptest.NewRequest(http.MethodPost, "/api/admin/members/sync", nil)
-	manual.Header.Set("X-Portal-User-Uid", "directory-admin")
-	manual.Header.Set("X-Portal-Roles", "portal-admin")
+	grantLocalAppRole(t, adminUID, model.AppRoleAdmin, true)
+	manual.Header.Set("X-Portal-User-Uid", adminUID)
 	manualResponse := httptest.NewRecorder()
 	New().ServeHTTP(manualResponse, manual)
 	if manualResponse.Code != http.StatusOK {
@@ -717,12 +969,268 @@ func TestPortalSessionUsesDirectoryDisplayNameAndFallsBackToUsername(t *testing.
 	}
 }
 
+func TestPortalSessionExposesPublicAssetManagementCapability(t *testing.T) {
+	tests := []struct {
+		name                   string
+		appRole                model.AppRole
+		enabled                bool
+		gatewayRoles           string
+		wantAdmin              bool
+		wantPublicAssetManager bool
+	}{
+		{name: "regular member", appRole: model.AppRoleMember, enabled: true, gatewayRoles: "portal-admin"},
+		{name: "public asset manager", appRole: model.AppRolePublicAssetsManager, enabled: true, gatewayRoles: "member", wantPublicAssetManager: true},
+		{name: "local admin", appRole: model.AppRoleAdmin, enabled: true, gatewayRoles: "design-team", wantAdmin: true, wantPublicAssetManager: true},
+		{name: "disabled local admin", appRole: model.AppRoleAdmin, enabled: false, gatewayRoles: "portal-admin", wantAdmin: false, wantPublicAssetManager: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			userUID := "session-role-" + strings.ReplaceAll(test.name, " ", "-")
+			grantLocalAppRole(t, userUID, test.appRole, test.enabled)
+			request := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+			request.Header.Set("X-Portal-User-Uid", userUID)
+			request.Header.Set("X-Portal-Roles", test.gatewayRoles)
+			response := httptest.NewRecorder()
+			New().ServeHTTP(response, request)
+
+			var payload struct {
+				Data struct {
+					AppRole               model.AppRole `json:"appRole"`
+					IsAdmin               bool          `json:"isAdmin"`
+					CanManagePublicAssets bool          `json:"canManagePublicAssets"`
+					User                  struct {
+						Roles []string `json:"roles"`
+					} `json:"user"`
+				} `json:"data"`
+			}
+			if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &payload) != nil {
+				t.Fatalf("session status/body = %d/%s", response.Code, response.Body.String())
+			}
+			if got := response.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("session Cache-Control = %q, want no-store", got)
+			}
+			wantRole := test.appRole
+			if !test.enabled {
+				wantRole = model.AppRoleMember
+			}
+			if payload.Data.AppRole != wantRole || payload.Data.IsAdmin != test.wantAdmin || payload.Data.CanManagePublicAssets != test.wantPublicAssetManager {
+				t.Fatalf("session permissions = role:%q admin:%t publicAssets:%t, want role:%q admin:%t publicAssets:%t", payload.Data.AppRole, payload.Data.IsAdmin, payload.Data.CanManagePublicAssets, wantRole, test.wantAdmin, test.wantPublicAssetManager)
+			}
+			if len(payload.Data.User.Roles) != 1 || payload.Data.User.Roles[0] != test.gatewayRoles {
+				t.Fatalf("raw Gateway roles = %#v, want [%q]", payload.Data.User.Roles, test.gatewayRoles)
+			}
+		})
+	}
+}
+
+func TestLocalPublicAssetsManagerCanManagePublicAssetsButNotOtherAdminRoutes(t *testing.T) {
+	const memberUID = "public-assets-member"
+	const managerUID = "public-assets-manager"
+	const adminUID = "public-assets-admin"
+	grantLocalAppRole(t, memberUID, model.AppRoleMember, true)
+	grantLocalAppRole(t, managerUID, model.AppRolePublicAssetsManager, true)
+	grantLocalAppRole(t, adminUID, model.AppRoleAdmin, true)
+
+	request := func(method, path, body, uid string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("X-Portal-User-Uid", uid)
+		res := httptest.NewRecorder()
+		New().ServeHTTP(res, req)
+		return res
+	}
+
+	member := request(http.MethodPost, "/api/admin/public-folders", `{"title":"普通成员无权目录"}`, memberUID)
+	if member.Code != http.StatusForbidden {
+		t.Fatalf("regular member create status = %d, want %d; body = %s", member.Code, http.StatusForbidden, member.Body.String())
+	}
+
+	manager := request(http.MethodPost, "/api/admin/public-folders", `{"title":"素材管理员目录"}`, managerUID)
+	if manager.Code != http.StatusOK {
+		t.Fatalf("asset manager create status = %d, want %d; body = %s", manager.Code, http.StatusOK, manager.Body.String())
+	}
+	var created struct {
+		Data model.PublicFolder `json:"data"`
+	}
+	if err := json.Unmarshal(manager.Body.Bytes(), &created); err != nil || created.Data.ID == "" {
+		t.Fatalf("asset manager create payload = %s, err = %v", manager.Body.String(), err)
+	}
+
+	renamed := request(http.MethodPatch, "/api/admin/public-folders/"+created.Data.ID, `{"title":"素材管理员重命名目录"}`, managerUID)
+	if renamed.Code != http.StatusOK {
+		t.Fatalf("asset manager rename status = %d, want %d; body = %s", renamed.Code, http.StatusOK, renamed.Body.String())
+	}
+	deleted := request(http.MethodDelete, "/api/admin/public-folders/"+created.Data.ID, "", managerUID)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("asset manager delete status = %d, want %d; body = %s", deleted.Code, http.StatusOK, deleted.Body.String())
+	}
+	if _, err := repository.SaveMedia(model.Media{ID: "media-public-assets-manager", OwnerUID: "public-assets-admin", ObjectKey: "images/public/assets-manager.png", ContentType: "image/png"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.SavePublicImage(model.PublicImage{ID: "public-image-assets-manager", MediaID: "media-public-assets-manager", Title: "原名称", UploaderUID: "public-assets-admin"}); err != nil {
+		t.Fatal(err)
+	}
+	imageUpdated := request(http.MethodPatch, "/api/admin/public-images/public-image-assets-manager", `{"title":"素材管理员修改图片"}`, managerUID)
+	if imageUpdated.Code != http.StatusOK {
+		t.Fatalf("asset manager image update status = %d, want %d; body = %s", imageUpdated.Code, http.StatusOK, imageUpdated.Body.String())
+	}
+
+	admin := request(http.MethodPost, "/api/admin/public-folders", `{"title":"管理员目录"}`, adminUID)
+	if admin.Code != http.StatusOK {
+		t.Fatalf("portal admin create status = %d, want %d; body = %s", admin.Code, http.StatusOK, admin.Body.String())
+	}
+
+	otherAdminRoute := request(http.MethodGet, "/api/admin/me", "", managerUID)
+	if otherAdminRoute.Code != http.StatusForbidden {
+		t.Fatalf("asset manager unrelated admin route status = %d, want %d; body = %s", otherAdminRoute.Code, http.StatusForbidden, otherAdminRoute.Body.String())
+	}
+}
+
+func TestRegularMemberCannotUseAnyPublicAssetMutationRoute(t *testing.T) {
+	const memberUID = "regular-public-assets-member"
+	grantLocalAppRole(t, memberUID, model.AppRoleMember, true)
+	routes := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{method: http.MethodPost, path: "/api/admin/public-images"},
+		{method: http.MethodPost, path: "/api/admin/public-folders", body: `{"title":"无权限"}`},
+		{method: http.MethodPatch, path: "/api/admin/public-folders/forbidden-folder", body: `{"title":"无权限"}`},
+		{method: http.MethodDelete, path: "/api/admin/public-folders/forbidden-folder"},
+		{method: http.MethodPatch, path: "/api/admin/public-images/forbidden-image", body: `{"title":"无权限"}`},
+		{method: http.MethodDelete, path: "/api/admin/public-images/forbidden-image"},
+	}
+
+	for _, route := range routes {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			request := httptest.NewRequest(route.method, route.path, strings.NewReader(route.body))
+			if route.body != "" {
+				request.Header.Set("Content-Type", "application/json")
+			}
+			request.Header.Set("X-Portal-User-Uid", memberUID)
+			response := httptest.NewRecorder()
+			New().ServeHTTP(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("regular member status = %d, want %d; body = %s", response.Code, http.StatusForbidden, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestLocalPublicAssetsManagerCanUploadAndDeletePublicImages(t *testing.T) {
+	const uploadManagerUID = "public-assets-manager-upload"
+	const deleteManagerUID = "public-assets-manager-delete"
+	grantLocalAppRole(t, uploadManagerUID, model.AppRolePublicAssetsManager, true)
+	grantLocalAppRole(t, deleteManagerUID, model.AppRolePublicAssetsManager, true)
+	pngData, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLxgAAAAABJRU5ErkJggg==")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("image", "manager-upload.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(pngData); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("title", "素材管理员上传"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	uploadRequest := httptest.NewRequest(http.MethodPost, "/api/admin/public-images", body)
+	uploadRequest.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadRequest.Header.Set("X-Portal-User-Uid", uploadManagerUID)
+	uploadResponse := httptest.NewRecorder()
+	New().ServeHTTP(uploadResponse, uploadRequest)
+	if uploadResponse.Code != http.StatusOK {
+		t.Fatalf("manager upload status = %d, want %d; body = %s", uploadResponse.Code, http.StatusOK, uploadResponse.Body.String())
+	}
+	var uploaded struct {
+		Data struct {
+			Item model.PublicImage `json:"item"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(uploadResponse.Body.Bytes(), &uploaded); err != nil {
+		t.Fatal(err)
+	}
+	if uploaded.Data.Item.ID == "" || uploaded.Data.Item.Title != "素材管理员上传" {
+		t.Fatalf("manager upload item = %+v; body = %s", uploaded.Data.Item, uploadResponse.Body.String())
+	}
+
+	media := model.Media{ID: "media-public-assets-manager-delete", OwnerUID: "public-assets-manager-delete", ObjectKey: "images/public/manager-delete.png", ContentType: "image/png"}
+	publicImage := model.PublicImage{ID: "public-image-assets-manager-delete", MediaID: media.ID, Title: "待删除素材", UploaderUID: media.OwnerUID}
+	objectPath := filepath.Join(mediaTestDirectory, filepath.FromSlash(media.ObjectKey))
+	if err := os.MkdirAll(filepath.Dir(objectPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(objectPath, []byte("image"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.SaveMedia(media); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.SavePublicImage(publicImage); err != nil {
+		t.Fatal(err)
+	}
+
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/admin/public-images/"+publicImage.ID, nil)
+	deleteRequest.Header.Set("X-Portal-User-Uid", deleteManagerUID)
+	deleteResponse := httptest.NewRecorder()
+	New().ServeHTTP(deleteResponse, deleteRequest)
+	if deleteResponse.Code != http.StatusOK {
+		t.Fatalf("manager delete status = %d, want %d; body = %s", deleteResponse.Code, http.StatusOK, deleteResponse.Body.String())
+	}
+	if _, err := os.Stat(objectPath); !os.IsNotExist(err) {
+		t.Fatalf("manager delete left object in place: %v", err)
+	}
+	if _, found, err := repository.GetPublicImage(publicImage.ID); err != nil || found {
+		t.Fatalf("manager delete public image found=%t err=%v", found, err)
+	}
+	if _, found, err := repository.GetMedia(media.ID); err != nil || found {
+		t.Fatalf("manager delete media found=%t err=%v", found, err)
+	}
+}
+
+func TestGatewayPublicAssetManagerRolesDoNotGrantLocalAuthorization(t *testing.T) {
+	const localManagerUID = "configured-local-public-assets-manager"
+	const gatewayManagerUID = "gateway-public-assets-manager-only"
+	grantLocalAppRole(t, localManagerUID, model.AppRolePublicAssetsManager, true)
+	grantLocalAppRole(t, gatewayManagerUID, model.AppRoleMember, true)
+
+	request := func(uid, roles string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/public-folders", strings.NewReader(`{"title":"自定义公共素材角色"}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Portal-User-Uid", uid)
+		request.Header.Set("X-Portal-Roles", roles)
+		response := httptest.NewRecorder()
+		New().ServeHTTP(response, request)
+		return response
+	}
+
+	if response := request(localManagerUID, "member"); response.Code != http.StatusOK {
+		t.Fatalf("local manager status = %d, want %d; body = %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if response := request(gatewayManagerUID, "portal-public-assets-manager,portal-admin"); response.Code != http.StatusForbidden {
+		t.Fatalf("Gateway-only manager status = %d, want %d; body = %s", response.Code, http.StatusForbidden, response.Body.String())
+	}
+}
+
 func TestOperationLogListsAuditedWriteAndCleansExpiredEntries(t *testing.T) {
+	const adminUID = "audit-admin"
+	grantLocalAppRole(t, adminUID, model.AppRoleAdmin, true)
 	request := httptest.NewRequest(http.MethodPost, "/api/admin/public-folders", bytes.NewBufferString(`{"title":"审计目录"}`))
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Portal-User-Uid", "audit-admin")
-	request.Header.Set("X-Portal-Username", "audit-admin")
-	request.Header.Set("X-Portal-Roles", "portal-admin")
+	request.Header.Set("X-Portal-User-Uid", adminUID)
+	request.Header.Set("X-Portal-Username", adminUID)
 	response := httptest.NewRecorder()
 	New().ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -730,8 +1238,7 @@ func TestOperationLogListsAuditedWriteAndCleansExpiredEntries(t *testing.T) {
 	}
 
 	request = httptest.NewRequest(http.MethodGet, "/api/admin/operation-logs?action=public_folder_create&actor=audit-admin", nil)
-	request.Header.Set("X-Portal-User-Uid", "audit-admin")
-	request.Header.Set("X-Portal-Roles", "portal-admin")
+	request.Header.Set("X-Portal-User-Uid", adminUID)
 	response = httptest.NewRecorder()
 	New().ServeHTTP(response, request)
 	var payload struct {
@@ -752,8 +1259,7 @@ func TestOperationLogListsAuditedWriteAndCleansExpiredEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/api/admin/operation-logs?action=image_edit&actor=audit-admin", nil)
-	request.Header.Set("X-Portal-User-Uid", "audit-admin")
-	request.Header.Set("X-Portal-Roles", "portal-admin")
+	request.Header.Set("X-Portal-User-Uid", adminUID)
 	response = httptest.NewRecorder()
 	New().ServeHTTP(response, request)
 	var summaryPayload struct {
@@ -979,6 +1485,7 @@ func TestDeletePublicImageAndMediaDeletesBothRecords(t *testing.T) {
 }
 
 func TestAdminPublicImageDeleteHardDeletesObjectAndRecords(t *testing.T) {
+	grantLocalAppRole(t, "admin", model.AppRoleAdmin, true)
 	media := model.Media{ID: "media-public-hard-delete", OwnerUID: "admin", ObjectKey: "images/public/hard-delete.png", ContentType: "image/png"}
 	publicImage := model.PublicImage{ID: "public-hard-delete", MediaID: media.ID, UploaderUID: media.OwnerUID}
 	objectPath := filepath.Join(mediaTestDirectory, filepath.FromSlash(media.ObjectKey))
@@ -997,7 +1504,6 @@ func TestAdminPublicImageDeleteHardDeletesObjectAndRecords(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodDelete, "/api/admin/public-images/"+publicImage.ID, nil)
 	request.Header.Set("X-Portal-User-Uid", media.OwnerUID)
-	request.Header.Set("X-Portal-Roles", "portal-admin")
 	response := httptest.NewRecorder()
 	New().ServeHTTP(response, request)
 
@@ -1024,6 +1530,7 @@ func TestAdminPublicImageDeleteHardDeletesObjectAndRecords(t *testing.T) {
 }
 
 func TestAdminPublicImageDeleteCleansRecordsWhenLocalObjectIsMissing(t *testing.T) {
+	grantLocalAppRole(t, "admin", model.AppRoleAdmin, true)
 	media := model.Media{ID: "media-public-missing-object", OwnerUID: "admin", ObjectKey: "images/public/missing.png", ContentType: "image/png"}
 	publicImage := model.PublicImage{ID: "public-missing-object", MediaID: media.ID, UploaderUID: media.OwnerUID}
 	if _, err := repository.SaveMedia(media); err != nil {
@@ -1035,7 +1542,6 @@ func TestAdminPublicImageDeleteCleansRecordsWhenLocalObjectIsMissing(t *testing.
 
 	request := httptest.NewRequest(http.MethodDelete, "/api/admin/public-images/"+publicImage.ID, nil)
 	request.Header.Set("X-Portal-User-Uid", media.OwnerUID)
-	request.Header.Set("X-Portal-Roles", "portal-admin")
 	response := httptest.NewRecorder()
 	New().ServeHTTP(response, request)
 
@@ -1095,13 +1601,16 @@ func TestPublicFolderListRequiresPortalIdentity(t *testing.T) {
 }
 
 func TestAdminCanCreateNestedPublicFoldersAndRejectsDuplicateSiblingNames(t *testing.T) {
+	grantLocalAppRole(t, "folder-member", model.AppRoleMember, true)
+	grantLocalAppRole(t, "folder-admin", model.AppRoleAdmin, true)
 	create := func(body string, admin bool) (*httptest.ResponseRecorder, model.PublicFolder) {
 		req := httptest.NewRequest(http.MethodPost, "/api/admin/public-folders", bytes.NewBufferString(body))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Portal-User-Uid", "folder-admin")
+		userUID := "folder-member"
 		if admin {
-			req.Header.Set("X-Portal-Roles", "portal-admin")
+			userUID = "folder-admin"
 		}
+		req.Header.Set("X-Portal-User-Uid", userUID)
 		res := httptest.NewRecorder()
 		New().ServeHTTP(res, req)
 		var payload struct {
@@ -1209,6 +1718,8 @@ func TestPublicImageListFiltersByFolderAndDefaultsToRoot(t *testing.T) {
 }
 
 func TestAdminPublicImageRenameAndMovePreserveMediaIdentityAndObjectKey(t *testing.T) {
+	grantLocalAppRole(t, "public-image-update-member", model.AppRoleMember, true)
+	grantLocalAppRole(t, "admin", model.AppRoleAdmin, true)
 	media := model.Media{ID: "media-public-move", OwnerUID: "admin", ObjectKey: "images/public/keep-object-key.png", ContentType: "image/png"}
 	if _, err := repository.SaveMedia(media); err != nil {
 		t.Fatal(err)
@@ -1223,7 +1734,7 @@ func TestAdminPublicImageRenameAndMovePreserveMediaIdentityAndObjectKey(t *testi
 
 	req := httptest.NewRequest(http.MethodPatch, "/api/admin/public-images/public-move", bytes.NewBufferString(`{"title":"  新名称  ","folderId":"`+folder.ID+`"}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Portal-User-Uid", "admin")
+	req.Header.Set("X-Portal-User-Uid", "public-image-update-member")
 	res := httptest.NewRecorder()
 	New().ServeHTTP(res, req)
 	if res.Code != http.StatusForbidden {
@@ -1233,7 +1744,6 @@ func TestAdminPublicImageRenameAndMovePreserveMediaIdentityAndObjectKey(t *testi
 	req = httptest.NewRequest(http.MethodPatch, "/api/admin/public-images/public-move", bytes.NewBufferString(`{"title":"  新名称  ","folderId":"`+folder.ID+`"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Portal-User-Uid", "admin")
-	req.Header.Set("X-Portal-Roles", "portal-admin")
 	res = httptest.NewRecorder()
 	New().ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
@@ -1249,6 +1759,7 @@ func TestAdminPublicImageRenameAndMovePreserveMediaIdentityAndObjectKey(t *testi
 }
 
 func TestAdminPublicImageUploadPersistsFolderImmediatelyAndRejectsUnknownFolderBeforeMediaWrite(t *testing.T) {
+	grantLocalAppRole(t, "admin", model.AppRoleAdmin, true)
 	folder, err := repository.SavePublicFolder(model.PublicFolder{ID: "folder-public-upload", Title: "上传目标", CreatedAt: "2026-08-21T00:00:00Z"})
 	if err != nil {
 		t.Fatal(err)
@@ -1279,7 +1790,6 @@ func TestAdminPublicImageUploadPersistsFolderImmediatelyAndRejectsUnknownFolderB
 		req := httptest.NewRequest(http.MethodPost, "/api/admin/public-images", body)
 		req.Header.Set("Content-Type", writer.FormDataContentType())
 		req.Header.Set("X-Portal-User-Uid", "admin")
-		req.Header.Set("X-Portal-Roles", "portal-admin")
 		res := httptest.NewRecorder()
 		New().ServeHTTP(res, req)
 		return res
@@ -1336,6 +1846,7 @@ func TestAdminPublicImageUploadPersistsFolderImmediatelyAndRejectsUnknownFolderB
 }
 
 func TestAdminCanRenameAndDeleteOnlyEmptyPublicFolders(t *testing.T) {
+	grantLocalAppRole(t, "admin", model.AppRoleAdmin, true)
 	empty, err := repository.SavePublicFolder(model.PublicFolder{ID: "folder-public-manage-empty", Title: "旧目录", CreatedAt: "2026-08-21T00:00:00Z"})
 	if err != nil {
 		t.Fatal(err)
@@ -1356,7 +1867,6 @@ func TestAdminCanRenameAndDeleteOnlyEmptyPublicFolders(t *testing.T) {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Portal-User-Uid", "admin")
-		req.Header.Set("X-Portal-Roles", "portal-admin")
 		res := httptest.NewRecorder()
 		New().ServeHTTP(res, req)
 		return res

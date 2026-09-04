@@ -17,6 +17,13 @@ type PortalMemberQuery struct {
 	PageSize int
 }
 
+// PortalMemberWithAppRole is an API response DTO. AppRole is owned by
+// app_member_roles and must never be persisted as Portal directory metadata.
+type PortalMemberWithAppRole struct {
+	PortalMember
+	AppRole AppRole `json:"appRole" gorm:"-"`
+}
+
 func (q *PortalMemberQuery) Normalize() {
 	if q.Page < 1 {
 		q.Page = 1
@@ -32,6 +39,6 @@ func (q *PortalMemberQuery) Normalize() {
 func (q *PortalMemberQuery) Offset() int { return (q.Page - 1) * q.PageSize }
 
 type PortalMemberList struct {
-	Items []PortalMember `json:"items"`
-	Total int            `json:"total"`
+	Items []PortalMemberWithAppRole `json:"items"`
+	Total int                       `json:"total"`
 }

@@ -17,12 +17,21 @@ https://www.semetaloa.com/apps/infinite-canvas/canvas
    mkdir -p /program/apps/infinite-canvas /program/data/infinite-canvas/media
    ```
 
-3. 在 `/program/apps/infinite-canvas/.env` 写入生产配置。文件不得提交到 Git，至少包含专属 PostgreSQL schema 的 `DATABASE_DSN`、OSS 配置、`PORTAL_DIRECTORY_SECRET` 和 AI 供应商配置所需的运行变量。
+3. 在 `/program/apps/infinite-canvas/.env` 写入生产配置。文件不得提交到 Git，至少包含专属 PostgreSQL schema 的 `DATABASE_DSN`、OSS 配置、`PORTAL_DIRECTORY_SECRET`、`APP_RBAC_INITIAL_ADMIN_UIDS` 和 AI 供应商配置所需的运行变量。
 4. 在 Portal 后台登记应用：
    - 应用键：`infinite-canvas`
    - 上游端口：`3000`
    - 启用应用，并向需要使用的角色授予 `app:infinite-canvas:access`。
-5. 在 GitHub 仓库的 `production` Environment 配置 Secrets：
+5. 按以下顺序完成应用内 RBAC 首次发布（新建数据库和升级部署均适用）：
+   1. 在 Portal 中确认目标初始管理员已启用且具有 `app:infinite-canvas:access`；`APP_RBAC_INITIAL_ADMIN_UIDS` 必须只包含这些准确的 Portal UID（多个 UID 用逗号分隔）。
+   2. 设置 `APP_RBAC_INITIAL_ADMIN_UIDS` 并部署。首次成功启动会在引导前同步 Portal 目录，确认这些 UID 已同步且启用后，一次性引导为 Infinite Canvas 本地管理员。目录同步或校验失败会使启动失败，不会写入完成标记。
+   3. 验证其中一位用户能够进入 `/admin/members`。
+   4. 在变更初始管理员前，先在“成员管理”中至少再授予一位用户本地管理员角色。
+   5. 引导完成标记已写入后，从部署环境移除 `APP_RBAC_INITIAL_ADMIN_UIDS`。
+   6. 此后所有 Infinite Canvas 角色都在“成员管理”中维护；不要为本应用分配 Portal 管理员或公共素材管理角色，也不要自动导入既有 Portal 公共素材管理员成员。
+
+完成标记存在后，后续启动不会再自动同步 Portal 目录；管理员可在成员管理中按需发起同步。Portal 仍负责可信身份和 `app:infinite-canvas:access` 应用入口。Gateway 注入的 Portal 角色只保留为展示和审计元数据，绝不参与 Infinite Canvas 授权。
+6. 在 GitHub 仓库的 `production` Environment 配置 Secrets：
    - `DEPLOY_HOST`
    - `DEPLOY_USER`
    - `DEPLOY_SSH_PRIVATE_KEY`

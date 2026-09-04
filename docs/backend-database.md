@@ -44,7 +44,13 @@
 
 图片媒体记录保存 OSS 或本地存储对象 Key、MIME、尺寸、字节数、所属 Portal 用户 UUID 与来源。`public_images` 关联媒体记录，并保存上传者和公共素材标题。
 
-私人媒体按 Portal 用户 UUID 隔离；公共图片仅允许 `portal-admin` 写入，所有已登录 Portal 用户可读取。旧 `assets` 表不会被迁移程序删除，但应用不再读取或写入它。
+私人媒体按 Portal 用户 UUID 隔离；公共图片和公共文件夹由本地 `admin` 或 `public_assets_manager` 写入，所有已通过 Portal 进入应用的用户可读取。公共素材管理权限只覆盖公共图片和文件夹接口，不授予管理后台其他功能。旧 `assets` 表不会被迁移程序删除，但应用不再读取或写入它。
+
+## app_member_roles 与 app_rbac_state
+
+`app_member_roles` 以 Portal 用户 UUID 为主键，只保存显式的 `admin` 和 `public_assets_manager` 分配；没有记录即为默认 `member`。`app_rbac_state` 保存一次性引导完成标记并序列化角色变更，避免最后一位本地管理员被并发撤销。权限解析同时要求对应 `portal_members` 记录已同步且启用。
+
+首次部署时，将已启用且具有应用入口的初始管理员准确 UID 配置到 `APP_RBAC_INITIAL_ADMIN_UIDS`。首次启动会在引导前同步目录，并要求这些成员在同步后保持启用；目录同步失败时引导不会完成。完成引导后角色仅在“成员管理”中维护，后续启动不再自动同步目录；Portal 继续提供身份和应用入口，其角色只保留为展示和审计元数据，绝不参与本地授权，也不会自动导入旧公共素材管理员成员。
 
 ## settings
 

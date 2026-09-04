@@ -69,7 +69,8 @@ func fetchDirectoryUsers(ctx context.Context) ([]directoryUser, error) {
 	}
 	unique := make(map[string]directoryUser, len(payload.Users))
 	for _, item := range payload.Users {
-		if _, err := uuid.Parse(strings.TrimSpace(item.UserUID)); err != nil || strings.TrimSpace(item.DisplayName) == "" || item.Roles == nil {
+		parsedUID, err := uuid.Parse(strings.TrimSpace(item.UserUID))
+		if err != nil || strings.TrimSpace(item.DisplayName) == "" || item.Roles == nil {
 			return nil, errors.New("Portal 用户目录响应无效")
 		}
 		for _, role := range item.Roles {
@@ -77,7 +78,8 @@ func fetchDirectoryUsers(ctx context.Context) ([]directoryUser, error) {
 				return nil, errors.New("Portal 用户目录响应无效")
 			}
 		}
-		unique[item.UserUID] = directoryUser{UserUID: item.UserUID, DisplayName: strings.TrimSpace(item.DisplayName), Enabled: item.Enabled, Roles: append([]string(nil), item.Roles...)}
+		userUID := parsedUID.String()
+		unique[userUID] = directoryUser{UserUID: userUID, DisplayName: strings.TrimSpace(item.DisplayName), Enabled: item.Enabled, Roles: append([]string(nil), item.Roles...)}
 	}
 	result := make([]directoryUser, 0, len(unique))
 	for _, item := range unique {
@@ -92,21 +94,28 @@ func SyncPortalMembers(ctx context.Context) (DirectorySyncResult, error) {
 		return DirectorySyncResult{}, err
 	}
 	syncedAt := time.Now().UTC()
-	items := make([]model.PortalMember, 0, len(users))
-	for _, user := range users {
-		items = append(items, model.PortalMember{UserUID: user.UserUID, DisplayName: user.DisplayName, Enabled: user.Enabled, Roles: user.Roles, SyncedAt: syncedAt})
-	}
+	items := portalMembersFromDirectoryUsers(users, syncedAt)
 	if err := repository.SyncPortalMembers(items); err != nil {
 		return DirectorySyncResult{}, err
 	}
 	return DirectorySyncResult{Count: len(items), SyncedAt: syncedAt}, nil
 }
 
+func portalMembersFromDirectoryUsers(users []directoryUser, syncedAt time.Time) []model.PortalMember {
+	items := make([]model.PortalMember, 0, len(users))
+	for _, user := range users {
+		items = append(items, model.PortalMember{UserUID: user.UserUID, DisplayName: user.DisplayName, Enabled: user.Enabled, Roles: user.Roles, SyncedAt: syncedAt})
+	}
+	return items
+}
+
 func SyncPortalMember(ctx context.Context, userUID string) error {
 	userUID = strings.TrimSpace(userUID)
-	if _, err := uuid.Parse(userUID); err != nil {
+	parsedUID, err := uuid.Parse(userUID)
+	if err != nil {
 		return safeMessageError{message: "用户标识无效"}
 	}
+	userUID = parsedUID.String()
 	users, err := fetchDirectoryUsers(ctx)
 	if err != nil {
 		return err
@@ -131,12 +140,22 @@ func ListPortalMembers(query model.PortalMemberQuery) (model.PortalMemberList, e
 	if err != nil {
 		return model.PortalMemberList{}, err
 	}
+	userUIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		userUIDs = append(userUIDs, item.UserUID)
+	}
+	roles, err := repository.ListAppRoles(userUIDs)
+	if err != nil {
+		return model.PortalMemberList{}, err
+	}
+	result := make([]model.PortalMemberWithAppRole, 0, len(items))
 	for index := range items {
 		if items[index].Roles == nil {
 			items[index].Roles = []string{}
 		}
+		result = append(result, model.PortalMemberWithAppRole{PortalMember: items[index], AppRole: roles[items[index].UserUID]})
 	}
-	return model.PortalMemberList{Items: items, Total: int(total)}, nil
+	return model.PortalMemberList{Items: result, Total: int(total)}, nil
 }
 
 func PortalDisplayName(user PortalUser) string {

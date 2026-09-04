@@ -37,3 +37,20 @@ func TestAdminSaveSettingsRejectsTrailingJSON(t *testing.T) {
 		t.Fatalf("response = %#v, want invalid settings request", result)
 	}
 }
+
+func TestRoleChangeHandlerRejectsMalformedAndTrailingJSON(t *testing.T) {
+	for _, body := range []string{"{", `{"appRole":"member"}{}`} {
+		request := httptest.NewRequest(http.MethodPatch, "/api/admin/members/target/app-role", strings.NewReader(body))
+		recorder := httptest.NewRecorder()
+
+		AdminSetPortalMemberAppRole(recorder, request, "target")
+
+		var result response
+		if err := json.NewDecoder(recorder.Body).Decode(&result); err != nil {
+			t.Fatal(err)
+		}
+		if recorder.Code != http.StatusBadRequest || result.Code != 1 || result.Data != nil {
+			t.Fatalf("response = status %d, body %#v; want HTTP 400 JSON envelope", recorder.Code, result)
+		}
+	}
+}

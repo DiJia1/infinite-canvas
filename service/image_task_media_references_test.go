@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/basketikun/infinite-canvas/model"
+	"github.com/basketikun/infinite-canvas/repository"
 )
 
 func TestReadImageTaskMediaReferencesKeepsRequestedOrderAndChecksAccess(t *testing.T) {
@@ -43,5 +44,25 @@ func TestReadImageTaskMediaReferencesKeepsRequestedOrderAndChecksAccess(t *testi
 	}
 	if _, err := readImageTaskMediaReferences(context.Background(), PortalUser{UID: "owner"}, []string{"media-a"}, failing, getPublic, store); err == nil {
 		t.Fatal("readImageTaskMediaReferences() hid repository errors")
+	}
+}
+
+func TestLocalAdminMediaReferencesAllowCrossUserPrivateImages(t *testing.T) {
+	const adminUID = "local-admin-image-reference"
+	seedPermissionMember(t, adminUID, true)
+	if err := repository.SetAppRole(adminUID, model.AppRoleAdmin, "test-grantor"); err != nil {
+		t.Fatal(err)
+	}
+	store := &memoryTaskInputStore{objects: map[string][]byte{"images/private-owner.png": tinyPNG}}
+	item := model.Media{ID: "local-admin-reference-media", OwnerUID: "private-owner", ObjectKey: "images/private-owner.png", Filename: "private-owner.png", ContentType: "image/png"}
+	getMedia := func(id string) (model.Media, bool, error) { return item, id == item.ID, nil }
+	getPublic := func(string) (model.PublicImage, bool, error) { return model.PublicImage{}, false, nil }
+
+	references, err := readImageTaskMediaReferences(context.Background(), PortalUser{UID: adminUID, Roles: []string{"member"}}, []string{item.ID}, getMedia, getPublic, store)
+	if err != nil {
+		t.Fatalf("local admin reference access error = %v", err)
+	}
+	if len(references) != 1 || references[0].Name != item.Filename {
+		t.Fatalf("references = %#v, want one cross-user private reference", references)
 	}
 }

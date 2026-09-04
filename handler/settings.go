@@ -2,11 +2,14 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 
 	"github.com/basketikun/infinite-canvas/model"
+	"github.com/basketikun/infinite-canvas/repository"
 	"github.com/basketikun/infinite-canvas/service"
 )
 
@@ -68,6 +71,43 @@ func AdminPortalMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	OK(w, result)
+}
+
+func AdminSetPortalMemberAppRole(w http.ResponseWriter, r *http.Request, targetUID string) {
+	var input struct {
+		AppRole model.AppRole `json:"appRole"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&input); err != nil {
+		FailStatus(w, http.StatusBadRequest, "应用角色请求无效")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		FailStatus(w, http.StatusBadRequest, "应用角色请求无效")
+		return
+	}
+	member, err := service.SetPortalMemberAppRole(r.Context(), targetUID, input.AppRole)
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrLastAppAdmin):
+			FailStatus(w, http.StatusConflict, "不能移除最后一名应用管理员")
+		case service.IsAppMemberRoleValidationError(err):
+			message := "应用角色请求无效"
+			if safe, ok := err.(interface{ SafeMessage() string }); ok {
+				message = safe.SafeMessage()
+			}
+			FailStatus(w, http.StatusBadRequest, message)
+		default:
+			log.Printf("application role change failed: target=%s error=%v", targetUID, err)
+			FailStatus(w, http.StatusInternalServerError, "操作失败")
+		}
+		return
+	}
+	service.RecordOperation(r.Context(), service.OperationLogInput{
+		Action: "member_app_role_change", TargetType: "portal_member", TargetID: member.UserUID, TargetName: member.DisplayName,
+		RequestSummary: `{"appRole":"` + string(member.AppRole) + `"}`,
+	})
+	OK(w, member)
 }
 
 func AdminSyncPortalMembers(w http.ResponseWriter, r *http.Request) {

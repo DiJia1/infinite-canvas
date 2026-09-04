@@ -76,12 +76,15 @@ func publicImageObjectKey(extension string, now time.Time) string {
 	return fmt.Sprintf("%s/public/%04d/%02d/%s.%s", prefix, now.Year(), now.Month(), uuid.NewString(), extension)
 }
 
-func canAccessMedia(user PortalUser, item model.Media) bool {
-	role := config.Cfg.PortalAdminRole
-	if strings.TrimSpace(role) == "" {
-		role = "portal-admin"
+func canAccessMedia(ctx context.Context, user PortalUser, item model.Media) (bool, error) {
+	if user.UID == item.OwnerUID {
+		return true, nil
 	}
-	return user.UID == item.OwnerUID || user.HasRole(role)
+	permissions, err := ResolveAppPermissions(ctx, user)
+	if err != nil {
+		return false, err
+	}
+	return permissions.IsAdmin, nil
 }
 
 func SaveUploadedImage(ctx context.Context, user PortalUser, filename, contentType string, data []byte, intent ...string) (MediaAccess, error) {
@@ -272,7 +275,11 @@ func MediaAccessURL(ctx context.Context, user PortalUser, id string) (MediaAcces
 	if !found {
 		return MediaAccess{}, safeMessageError{message: "图片不存在"}
 	}
-	if !canAccessMedia(user, item) {
+	allowed, err := canAccessMedia(ctx, user, item)
+	if err != nil {
+		return MediaAccess{}, err
+	}
+	if !allowed {
 		return MediaAccess{}, safeMessageError{message: "无权访问该图片"}
 	}
 	store, err := newImageStore()
@@ -290,7 +297,11 @@ func DeletePrivateMedia(ctx context.Context, user PortalUser, id string) error {
 	if !found {
 		return nil
 	}
-	if !canAccessMedia(user, item) {
+	allowed, err := canAccessMedia(ctx, user, item)
+	if err != nil {
+		return privateMediaDeleteFailure(id, err)
+	}
+	if !allowed {
 		return safeMessageError{message: "无权删除该图片"}
 	}
 	_, isPublic, err := repository.GetPublicImageByMediaID(item.ID)
@@ -358,7 +369,11 @@ func OpenLocalMedia(ctx context.Context, user PortalUser, id string) (io.ReadClo
 	if !found {
 		return nil, "", safeMessageError{message: "图片不存在"}
 	}
-	if !canAccessMedia(user, item) {
+	allowed, err := canAccessMedia(ctx, user, item)
+	if err != nil {
+		return nil, "", err
+	}
+	if !allowed {
 		return nil, "", safeMessageError{message: "无权访问该图片"}
 	}
 	store, err := newImageStore()

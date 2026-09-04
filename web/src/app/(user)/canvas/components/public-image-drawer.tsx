@@ -18,13 +18,13 @@ import {
     uploadAdminPublicImage,
     type PublicImage,
 } from "@/services/api/public-images";
-import { fetchPortalSession } from "@/services/api/session";
 import { MaterialDrawer } from "./material-drawer";
 import { MaterialDrawerToolbar, MaterialThumbnailControl } from "./material-drawer-toolbar";
 import { DEFAULT_MATERIAL_THUMBNAIL_STAGE, MaterialContextMenu, MaterialFolderBreadcrumbs, MaterialFolderTree, folderPath, materialThumbnailGridClass, type MaterialFolder } from "./material-folder-ui";
 import { MaterialBrokenImagePlaceholder, MaterialImagePreviewModal } from "./material-image-preview";
 import { PUBLIC_IMAGE_DRAG_TYPE, readImageDropPayload, type PublicImageDropPayload } from "./material-image-drag";
 import { useMaterialMediaPreview } from "./use-material-media-preview";
+import { usePublicAssetManagementCapability } from "./use-public-asset-management-capability";
 
 const PAGE_SIZE = 24;
 type ContextMenu = { x: number; y: number };
@@ -48,8 +48,7 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
     const [editorValue, setEditorValue] = useState("");
     const fileInputRef = useRef<HTMLInputElement>(null);
     const drawerPointerInsideRef = useRef(false);
-    const session = useQuery({ queryKey: ["portal-session"], queryFn: fetchPortalSession, enabled: open, retry: false, staleTime: 5 * 60 * 1000 });
-    const isAdmin = Boolean(session.data?.isAdmin);
+    const canManagePublicAssets = usePublicAssetManagementCapability(open);
     const foldersQuery = useQuery({ queryKey: ["public-image-folders"], queryFn: fetchPublicImageFolders, enabled: open, retry: false, staleTime: 30 * 1000 });
     const folders = useMemo<MaterialFolder[]>(() => (foldersQuery.data?.items || []).map((folder) => ({ id: folder.id, name: folder.title, parentId: folder.parentId || undefined })), [foldersQuery.data?.items]);
     const query = useQuery({
@@ -69,7 +68,7 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
             await invalidatePublicLibrary();
             message.success("公共图片已上传");
         },
-        onError: (error) => message.error(error instanceof Error ? error.message : "仅管理员可以上传公共图片"),
+        onError: (error) => message.error(error instanceof Error ? error.message : "没有公共素材管理权限"),
     });
     const remove = useMutation({
         mutationFn: deleteAdminPublicImage,
@@ -87,7 +86,7 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
         if (currentFolderId && !folders.some((folder) => folder.id === currentFolderId)) setCurrentFolderId(undefined);
     }, [currentFolderId, folders]);
     useEffect(() => {
-        if (!open || !isAdmin) return;
+        if (!open || !canManagePublicAssets) return;
         const handlePasteKeyDown = (event: KeyboardEvent) => {
             if (!drawerPointerInsideRef.current || isEditableTarget(event.target)) return;
             if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "v") event.stopImmediatePropagation();
@@ -105,10 +104,10 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
             window.removeEventListener("keydown", handlePasteKeyDown, true);
             window.removeEventListener("paste", handlePaste, true);
         };
-    }, [isAdmin, open, upload]);
+    }, [canManagePublicAssets, open, upload]);
 
     const submitEditor = async () => {
-        if (!editor || !isAdmin) return;
+        if (!editor || !canManagePublicAssets) return;
         const value = editorValue.trim();
         if (!value) {
             message.error("名称不能为空");
@@ -128,7 +127,7 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
     const handleFolderDrop = async (folderId: string, event: DragEvent<HTMLButtonElement>) => {
         event.preventDefault();
         event.stopPropagation();
-        if (!isAdmin) return;
+        if (!canManagePublicAssets) return;
         const payload = readImageDropPayload<PublicImageDropPayload>(event.dataTransfer.getData(PUBLIC_IMAGE_DRAG_TYPE));
         if (!payload?.id) return;
         try {
@@ -140,6 +139,7 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
         }
     };
     const movePublicImage = async (image: PublicImage, folderId?: string) => {
+        if (!canManagePublicAssets) return;
         try {
             await updateAdminPublicImage(image.id, { folderId: folderId || "" });
             await invalidatePublicLibrary();
@@ -167,7 +167,7 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
                 <div
                     className="thin-scrollbar min-h-0 flex-1 overflow-y-auto p-4"
                     onContextMenu={(event) => {
-                        if (!isAdmin || (event.target as Element).closest("[data-material-card], [data-folder-id]")) return;
+                        if (!canManagePublicAssets || (event.target as Element).closest("[data-material-card], [data-folder-id]")) return;
                         event.preventDefault();
                         setContextMenu({ x: event.clientX, y: event.clientY });
                     }}
@@ -178,7 +178,7 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
                     }}
                 >
                     <div className="space-y-4">
-                        <MaterialDrawerToolbar keyword={keyword} placeholder="搜索当前文件夹" onKeywordChange={setKeyword} onAddImage={isAdmin ? () => fileInputRef.current?.click() : undefined} isUploading={upload.isPending} />
+                        <MaterialDrawerToolbar keyword={keyword} placeholder="搜索当前文件夹" onKeywordChange={setKeyword} onAddImage={canManagePublicAssets ? () => fileInputRef.current?.click() : undefined} isUploading={upload.isPending} />
                         <MaterialFolderBreadcrumbs folders={folders} currentFolderId={currentFolderId} onNavigate={setCurrentFolderId} />
                         {foldersQuery.isLoading || query.isLoading ? (
                             <div className="flex justify-center py-16">
@@ -194,7 +194,7 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
                                     onFolderContextMenu={(folder, event) => {
                                         event.preventDefault();
                                         event.stopPropagation();
-                                        if (!isAdmin) return;
+                                        if (!canManagePublicAssets) return;
                                         setContextMenu(undefined);
                                         setImageContextMenu(undefined);
                                         setFolderContextMenu({ folder, x: event.clientX, y: event.clientY });
@@ -206,7 +206,7 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
                                             <PublicImageCard
                                                 key={image.id}
                                                 image={image}
-                                                isAdmin={isAdmin}
+                                                canManagePublicAssets={canManagePublicAssets}
                                                 onPreview={setPreview}
                                                 onImageContextMenu={(event) => {
                                                     event.preventDefault();
@@ -230,7 +230,7 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
                     </div>
                 </div>
                 <MaterialThumbnailControl thumbnailStage={thumbnailStage} onThumbnailStageChange={setThumbnailStage} />
-                {isAdmin ? (
+                {canManagePublicAssets ? (
                     <input
                         ref={fileInputRef}
                         type="file"
@@ -238,60 +238,64 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
                         className="hidden"
                         onChange={(event) => {
                             const file = event.target.files?.[0];
-                            if (file && !upload.isPending) upload.mutate(file);
+                            if (canManagePublicAssets && file && !upload.isPending) upload.mutate(file);
                             event.target.value = "";
                         }}
                     />
                 ) : null}
-                <MaterialContextMenu position={contextMenu}>
-                    <button
-                        type="button"
-                        className="block w-full px-3 py-2 text-left hover:bg-stone-50 dark:hover:bg-stone-800"
-                        onClick={() => {
-                            setContextMenu(undefined);
-                            setEditorValue("");
-                            setEditor({ kind: "folder" });
-                        }}
-                    >
-                        新建文件夹
-                    </button>
-                </MaterialContextMenu>
-                <MaterialContextMenu position={imageContextMenu}>
-                    <>
+                {canManagePublicAssets ? (
+                    <MaterialContextMenu position={contextMenu}>
                         <button
                             type="button"
                             className="block w-full px-3 py-2 text-left hover:bg-stone-50 dark:hover:bg-stone-800"
                             onClick={() => {
-                                setEditorValue(imageContextMenu?.image.title || "");
-                                if (imageContextMenu) setEditor({ kind: "rename", image: imageContextMenu.image });
-                                setImageContextMenu(undefined);
+                                setContextMenu(undefined);
+                                setEditorValue("");
+                                setEditor({ kind: "folder" });
                             }}
                         >
-                            重命名
+                            新建文件夹
                         </button>
-                        <button
-                            type="button"
-                            className="block w-full px-3 py-2 text-left hover:bg-stone-50 dark:hover:bg-stone-800"
-                            onClick={() => {
-                                if (imageContextMenu) setEditor({ kind: "move", image: imageContextMenu.image });
-                                setImageContextMenu(undefined);
-                            }}
-                        >
-                            移动到文件夹
-                        </button>
-                        <button
-                            type="button"
-                            className="block w-full px-3 py-2 text-left text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30"
-                            onClick={() => {
-                                if (imageContextMenu) remove.mutate(imageContextMenu.image.id);
-                                setImageContextMenu(undefined);
-                            }}
-                        >
-                            删除
-                        </button>
-                    </>
-                </MaterialContextMenu>
-                {isAdmin ? (
+                    </MaterialContextMenu>
+                ) : null}
+                {canManagePublicAssets ? (
+                    <MaterialContextMenu position={imageContextMenu}>
+                        <>
+                            <button
+                                type="button"
+                                className="block w-full px-3 py-2 text-left hover:bg-stone-50 dark:hover:bg-stone-800"
+                                onClick={() => {
+                                    setEditorValue(imageContextMenu?.image.title || "");
+                                    if (imageContextMenu) setEditor({ kind: "rename", image: imageContextMenu.image });
+                                    setImageContextMenu(undefined);
+                                }}
+                            >
+                                重命名
+                            </button>
+                            <button
+                                type="button"
+                                className="block w-full px-3 py-2 text-left hover:bg-stone-50 dark:hover:bg-stone-800"
+                                onClick={() => {
+                                    if (imageContextMenu) setEditor({ kind: "move", image: imageContextMenu.image });
+                                    setImageContextMenu(undefined);
+                                }}
+                            >
+                                移动到文件夹
+                            </button>
+                            <button
+                                type="button"
+                                className="block w-full px-3 py-2 text-left text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30"
+                                onClick={() => {
+                                    if (imageContextMenu && canManagePublicAssets) remove.mutate(imageContextMenu.image.id);
+                                    setImageContextMenu(undefined);
+                                }}
+                            >
+                                删除
+                            </button>
+                        </>
+                    </MaterialContextMenu>
+                ) : null}
+                {canManagePublicAssets ? (
                     <MaterialContextMenu position={folderContextMenu}>
                         <>
                             <button
@@ -313,7 +317,7 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
                                 onClick={() => {
                                     const folder = folderContextMenu?.folder;
                                     setFolderContextMenu(undefined);
-                                    if (!folder) return;
+                                    if (!folder || !canManagePublicAssets) return;
                                     void (async () => {
                                         try {
                                             await deleteAdminPublicImageFolder(folder.id);
@@ -334,7 +338,7 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
             </MaterialDrawer>
             <MaterialImagePreviewModal preview={preview} onClose={() => setPreview(undefined)} />
             <Modal
-                open={Boolean(editor)}
+                open={canManagePublicAssets && Boolean(editor)}
                 title={editor?.kind === "folder" ? "新建文件夹" : editor?.kind === "folderRename" ? "重命名文件夹" : editor?.kind === "move" ? "移动到文件夹" : "重命名图片"}
                 okText="保存"
                 cancelText="取消"
@@ -373,7 +377,17 @@ export function PublicImageDrawer({ open, onClose }: { open: boolean; onClose: (
     );
 }
 
-function PublicImageCard({ image, isAdmin, onPreview, onImageContextMenu }: { image: PublicImage; isAdmin: boolean; onPreview: (preview: { title: string; url: string }) => void; onImageContextMenu: (event: MouseEvent) => void }) {
+function PublicImageCard({
+    image,
+    canManagePublicAssets,
+    onPreview,
+    onImageContextMenu,
+}: {
+    image: PublicImage;
+    canManagePublicAssets: boolean;
+    onPreview: (preview: { title: string; url: string }) => void;
+    onImageContextMenu: (event: MouseEvent) => void;
+}) {
     const [loadFailed, setLoadFailed] = useState(false);
     const loadAccess = useCallback(async () => await fetchPublicImageAccess(image.id), [image.id]);
     const { ref, url, error, loading, loadOriginal } = useMaterialMediaPreview({ identity: image.id, mediaId: image.mediaId, enabled: true, loadAccess });
@@ -400,9 +414,9 @@ function PublicImageCard({ image, isAdmin, onPreview, onImageContextMenu }: { im
             }}
             onContextMenu={(event: MouseEvent) => {
                 event.preventDefault();
-                if (isAdmin) onImageContextMenu(event);
+                if (canManagePublicAssets) onImageContextMenu(event);
             }}
-            title={url && !previewFailed ? (isAdmin ? "点击查看，拖入画布使用；右键管理" : "点击查看，拖入画布使用") : previewFailed ? "图片已损坏" : "图片加载中"}
+            title={url && !previewFailed ? (canManagePublicAssets ? "点击查看，拖入画布使用；右键管理" : "点击查看，拖入画布使用") : previewFailed ? "图片已损坏" : "图片加载中"}
         >
             {previewFailed ? (
                 <MaterialBrokenImagePlaceholder />

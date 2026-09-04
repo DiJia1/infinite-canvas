@@ -5,7 +5,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/basketikun/infinite-canvas/config"
 	"github.com/basketikun/infinite-canvas/service"
 	"github.com/gin-gonic/gin"
 )
@@ -39,13 +38,36 @@ func PortalIdentity(c *gin.Context) {
 	c.Next()
 }
 
-func RequirePortalAdmin(c *gin.Context) {
+func RequireAppAdmin(c *gin.Context) {
 	user, ok := service.PortalUserFromContext(c.Request.Context())
-	role := config.Cfg.PortalAdminRole
-	if strings.TrimSpace(role) == "" {
-		role = "portal-admin"
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 1, "data": nil, "msg": "未登录或权限不足"})
+		return
 	}
-	if !ok || !user.HasRole(role) {
+	permissions, err := service.ResolveAppPermissions(c.Request.Context(), user)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 1, "data": nil, "msg": "权限检查失败"})
+		return
+	}
+	if !permissions.IsAdmin {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 1, "data": nil, "msg": "未登录或权限不足"})
+		return
+	}
+	c.Next()
+}
+
+func RequirePublicAssetManager(c *gin.Context) {
+	user, ok := service.PortalUserFromContext(c.Request.Context())
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 1, "data": nil, "msg": "未登录或权限不足"})
+		return
+	}
+	permissions, err := service.ResolveAppPermissions(c.Request.Context(), user)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 1, "data": nil, "msg": "权限检查失败"})
+		return
+	}
+	if !permissions.CanManagePublicAssets {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 1, "data": nil, "msg": "未登录或权限不足"})
 		return
 	}

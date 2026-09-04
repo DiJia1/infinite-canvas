@@ -393,10 +393,26 @@ func AdminUpdatePublicImage(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func PortalSession(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	user, ok := service.PortalUserFromContext(r.Context())
 	if !ok {
 		Fail(w, "未经过 Portal Gateway 身份验证")
 		return
 	}
-	OK(w, map[string]any{"user": map[string]any{"uid": user.UID, "username": user.Username, "displayName": service.PortalDisplayName(user), "roles": user.Roles}, "isAdmin": service.IsPortalAdmin(user)})
+	permissions, err := service.ResolveAppPermissions(r.Context(), user)
+	if err != nil {
+		FailError(w, err)
+		return
+	}
+	OK(w, map[string]any{
+		"user": map[string]any{
+			"uid":         user.UID,
+			"username":    user.Username,
+			"displayName": service.PortalDisplayName(user),
+			"roles":       user.Roles,
+		},
+		"appRole":               permissions.AppRole,
+		"isAdmin":               permissions.IsAdmin,
+		"canManagePublicAssets": permissions.CanManagePublicAssets,
+	})
 }

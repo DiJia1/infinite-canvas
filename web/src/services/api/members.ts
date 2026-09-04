@@ -1,4 +1,6 @@
-import { apiGet } from "@/services/api/request";
+import { apiGet, apiPatch } from "@/services/api/request";
+
+export type AppRole = "member" | "public_assets_manager" | "admin";
 
 export type PortalMember = {
     userUid: string;
@@ -6,6 +8,7 @@ export type PortalMember = {
     enabled: boolean;
     roles: string[];
     syncedAt: string;
+    appRole: AppRole;
 };
 
 export type PortalMemberList = {
@@ -15,4 +18,8 @@ export type PortalMemberList = {
 
 export function fetchPortalMembers(query: { page?: number; pageSize?: number; query?: string } = {}) {
     return apiGet<PortalMemberList>("/api/admin/members", query);
+}
+
+export function updatePortalMemberAppRole(userUID: string, appRole: AppRole) {
+    return apiPatch<PortalMember>(`/api/admin/members/${encodeURIComponent(userUID)}/app-role`, { appRole });
 }

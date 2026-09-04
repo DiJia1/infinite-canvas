@@ -21,3 +21,10 @@ test("management navigation has one complete shared destination list", () => {
 		["/admin/members", "/admin/operations", "/admin/statistics", "/admin/settings"],
 	);
 });
+
+test("management navigation relies on the local session capability, not raw Portal roles", async () => {
+    const source = await readFile(sourceURL, "utf8");
+
+    assert.match(source, /session\.data\?\.isAdmin/);
+    assert.doesNotMatch(source, /session\.data\?\.user\.roles|portal-admin|portal-public-assets-manager/);
+});

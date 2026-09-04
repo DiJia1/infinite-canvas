@@ -58,27 +58,31 @@ func New() *gin.Engine {
 	v1.GET("/videos/:id/content", func(c *gin.Context) {
 		handler.AIVideoContent(c.Writer, c.Request, c.Param("id"))
 	})
-	admin := protected.Group("/admin", middleware.RequirePortalAdmin)
+	admin := protected.Group("/admin", middleware.RequireAppAdmin)
 	admin.GET("/me", gin.WrapF(handler.AdminCurrent))
 	admin.GET("/settings", gin.WrapF(handler.AdminSettings))
 	admin.POST("/settings", gin.WrapF(handler.AdminSaveSettings))
 	admin.GET("/ai/provider-types", gin.WrapF(handler.AdminAIProviderTypes))
 	admin.GET("/operation-logs", gin.WrapF(handler.AdminOperationLogs))
 	admin.GET("/members", gin.WrapF(handler.AdminPortalMembers))
+	admin.PATCH("/members/:uid/app-role", func(c *gin.Context) {
+		handler.AdminSetPortalMemberAppRole(c.Writer, c.Request, c.Param("uid"))
+	})
 	admin.GET("/statistics", gin.WrapF(handler.AdminStatistics))
 	admin.POST("/members/sync", gin.WrapF(handler.AdminSyncPortalMembers))
-	admin.POST("/public-images", gin.WrapF(handler.AdminUploadPublicImage))
-	admin.POST("/public-folders", gin.WrapF(handler.AdminCreatePublicFolder))
-	admin.PATCH("/public-folders/:id", func(c *gin.Context) {
+	publicAssets := protected.Group("/admin", middleware.RequirePublicAssetManager)
+	publicAssets.POST("/public-images", gin.WrapF(handler.AdminUploadPublicImage))
+	publicAssets.POST("/public-folders", gin.WrapF(handler.AdminCreatePublicFolder))
+	publicAssets.PATCH("/public-folders/:id", func(c *gin.Context) {
 		handler.AdminRenamePublicFolder(c.Writer, c.Request, c.Param("id"))
 	})
-	admin.DELETE("/public-folders/:id", func(c *gin.Context) {
+	publicAssets.DELETE("/public-folders/:id", func(c *gin.Context) {
 		handler.AdminDeletePublicFolder(c.Writer, c.Request, c.Param("id"))
 	})
-	admin.PATCH("/public-images/:id", func(c *gin.Context) {
+	publicAssets.PATCH("/public-images/:id", func(c *gin.Context) {
 		handler.AdminUpdatePublicImage(c.Writer, c.Request, c.Param("id"))
 	})
-	admin.DELETE("/public-images/:id", func(c *gin.Context) {
+	publicAssets.DELETE("/public-images/:id", func(c *gin.Context) {
 		handler.AdminDeletePublicImage(c.Writer, c.Request, c.Param("id"))
 	})
 
