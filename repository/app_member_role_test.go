@@ -2,14 +2,12 @@ package repository
 
 import (
 	"errors"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/basketikun/infinite-canvas/config"
 	"github.com/basketikun/infinite-canvas/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -24,17 +22,10 @@ const (
 
 func useAppRoleTestDB(t *testing.T) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "app-rbac.db")
-	useRepositoryTestDB(t, config.Config{StorageDriver: "sqlite", DatabaseDSN: path})
-	database, err := DB()
-	if err != nil {
-		t.Fatal(err)
-	}
-	sqlDB, err := database.DB()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = sqlDB.Close() })
+	cfg := newRepositoryTestConfig(t, "app_member_role")
+	cfg.DatabaseMaxOpenConns = 5
+	cfg.DatabaseMaxIdleConns = 5
+	useRepositoryTestDB(t, cfg)
 }
 
 func savePortalMemberForAppRole(t *testing.T, userUID string, enabled bool) {
@@ -605,20 +596,11 @@ func TestRoleDemotionSerializesWithPortalMemberDisable(t *testing.T) {
 			default:
 			}
 			var writeErr error
-			writeReturnedWhilePaused := false
 			select {
 			case writeErr = <-writeResult:
-				writeReturnedWhilePaused = true
-				if writeErr == nil {
-					release()
-					<-demotionResult
-					t.Fatal("Portal member disable committed while role demotion held the RBAC state lock")
-				}
-				if !isSQLiteContentionError(writeErr) {
-					release()
-					<-demotionResult
-					t.Fatalf("Portal member disable returned unexpected early error: %v", writeErr)
-				}
+				release()
+				<-demotionResult
+				t.Fatalf("Portal member disable returned while role demotion held the RBAC state lock: %v", writeErr)
 			case <-time.After(150 * time.Millisecond):
 			}
 			select {
@@ -632,20 +614,10 @@ func TestRoleDemotionSerializesWithPortalMemberDisable(t *testing.T) {
 			if err := <-demotionResult; err != nil {
 				t.Fatalf("demotion after count barrier failed: %v", err)
 			}
-			if !writeReturnedWhilePaused {
-				select {
-				case writeErr = <-writeResult:
-				case <-time.After(2 * time.Second):
-					t.Fatal("Portal member disable did not finish after role demotion released the RBAC state lock")
-				}
-			}
-
-			if isSQLiteContentionError(writeErr) {
-				member, found, err := GetPortalMember(secondAdminUID)
-				if err != nil || !found || !member.Enabled {
-					t.Fatalf("contention error committed member disable: member=%+v found=%t err=%v", member, found, err)
-				}
-				writeErr = test.disable()
+			select {
+			case writeErr = <-writeResult:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Portal member disable did not finish after role demotion released the RBAC state lock")
 			}
 			if !errors.Is(writeErr, ErrLastAppAdmin) {
 				t.Fatalf("serialized member disable error = %v, want ErrLastAppAdmin", writeErr)
@@ -663,12 +635,4 @@ func TestRoleDemotionSerializesWithPortalMemberDisable(t *testing.T) {
 			}
 		})
 	}
-}
-
-func isSQLiteContentionError(err error) bool {
-	if err == nil {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "locked") || strings.Contains(message, "busy")
 }

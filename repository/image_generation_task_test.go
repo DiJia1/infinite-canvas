@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/basketikun/infinite-canvas/config"
 	"github.com/basketikun/infinite-canvas/model"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
@@ -15,7 +14,7 @@ import (
 
 func useImageTaskTestDB(t *testing.T) {
 	t.Helper()
-	useRepositoryTestDB(t, config.Config{StorageDriver: "sqlite", DatabaseDSN: ":memory:"})
+	useRepositoryTestDB(t, newRepositoryTestConfig(t, "image_generation_task"))
 }
 
 func TestListSucceededImageGenerationTasksFinishedBetweenReturnsOnlyCompletedTasks(t *testing.T) {

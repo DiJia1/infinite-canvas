@@ -3,10 +3,10 @@ package service
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/basketikun/infinite-canvas/config"
+	"github.com/basketikun/infinite-canvas/internal/testpostgres"
 	"github.com/basketikun/infinite-canvas/model"
 	"github.com/basketikun/infinite-canvas/repository"
 )
@@ -16,16 +16,33 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
+	schema, err := testpostgres.NewSchema("service")
+	if err != nil {
+		panic(err)
+	}
 	config.Cfg = config.Config{
-		StorageDriver: "sqlite", DatabaseDSN: filepath.Join(directory, "service.db"),
+		StorageDriver: "postgres", DatabaseDSN: schema.DSN,
 		MediaStorage: "local", MediaLocalDir: directory,
 	}
 	if _, err := repository.DB(); err != nil {
 		panic(err)
 	}
 	code := m.Run()
+	closeRepositoryPool()
+	_ = schema.Close()
 	_ = os.RemoveAll(directory)
 	os.Exit(code)
+}
+
+func closeRepositoryPool() {
+	database, _ := repository.DB()
+	if database == nil {
+		return
+	}
+	sqlDB, err := database.DB()
+	if err == nil {
+		_ = sqlDB.Close()
+	}
 }
 
 func seedPermissionMember(t *testing.T, userUID string, enabled bool) {

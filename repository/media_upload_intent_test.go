@@ -4,12 +4,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/basketikun/infinite-canvas/config"
 	"github.com/basketikun/infinite-canvas/model"
 )
 
 func TestCompleteMediaUploadIntentIsOwnerScopedAndIdempotent(t *testing.T) {
-	useRepositoryTestDB(t, config.Config{StorageDriver: "sqlite", DatabaseDSN: ":memory:"})
+	useRepositoryTestDB(t, newRepositoryTestConfig(t, "media_upload_intent"))
 	intent := model.MediaUploadIntent{
 		ID: "upload-intent-1", OwnerUID: "owner-1", ObjectKey: "images/private/owner-1/upload.png",
 		Filename: "upload.png", ContentType: "image/png", ExpectedBytes: 42, Intent: "library",
@@ -32,7 +31,7 @@ func TestCompleteMediaUploadIntentIsOwnerScopedAndIdempotent(t *testing.T) {
 }
 
 func TestListExpiredUncompletedMediaUploadIntentsExcludesCompletedItems(t *testing.T) {
-	useRepositoryTestDB(t, config.Config{StorageDriver: "sqlite", DatabaseDSN: ":memory:"})
+	useRepositoryTestDB(t, newRepositoryTestConfig(t, "media_upload_intent"))
 	now := time.Now().UTC()
 	for _, item := range []model.MediaUploadIntent{
 		{ID: "expired-pending", OwnerUID: "owner", ObjectKey: "expired-pending", ExpiresAt: now.Add(-time.Minute).Format(time.RFC3339Nano), CreatedAt: now.Format(time.RFC3339Nano)},
@@ -50,7 +49,7 @@ func TestListExpiredUncompletedMediaUploadIntentsExcludesCompletedItems(t *testi
 }
 
 func TestFinalizeMediaUploadIntentCreatesOnlyOneMediaRecord(t *testing.T) {
-	useRepositoryTestDB(t, config.Config{StorageDriver: "sqlite", DatabaseDSN: ":memory:"})
+	useRepositoryTestDB(t, newRepositoryTestConfig(t, "media_upload_intent"))
 	now := time.Now().UTC()
 	intent := model.MediaUploadIntent{ID: "upload-intent-finalize", OwnerUID: "owner", ObjectKey: "images/private/owner/finalize.png", Filename: "finalize.png", ContentType: "image/png", ExpectedBytes: 42, ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano), CreatedAt: now.Format(time.RFC3339Nano)}
 	if err := SaveMediaUploadIntent(intent); err != nil {

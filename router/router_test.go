@@ -18,6 +18,7 @@ import (
 
 	_ "github.com/basketikun/infinite-canvas/ai/providers"
 	"github.com/basketikun/infinite-canvas/config"
+	"github.com/basketikun/infinite-canvas/internal/testpostgres"
 	"github.com/basketikun/infinite-canvas/model"
 	"github.com/basketikun/infinite-canvas/repository"
 	"github.com/basketikun/infinite-canvas/service"
@@ -32,16 +33,33 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	mediaTestDirectory = directory
+	schema, err := testpostgres.NewSchema("router")
+	if err != nil {
+		panic(err)
+	}
 	config.Cfg = config.Config{
-		StorageDriver:                  "sqlite",
-		DatabaseDSN:                    filepath.Join(directory, "canvas.db"),
+		StorageDriver:                  "postgres",
+		DatabaseDSN:                    schema.DSN,
 		MediaStorage:                   "local",
 		MediaLocalDir:                  directory,
 		CanvasSaveSuccessLogSampleRate: 1,
 	}
 	code := m.Run()
+	closeRepositoryPool()
+	_ = schema.Close()
 	_ = os.RemoveAll(directory)
 	os.Exit(code)
+}
+
+func closeRepositoryPool() {
+	database, _ := repository.DB()
+	if database == nil {
+		return
+	}
+	sqlDB, err := database.DB()
+	if err == nil {
+		_ = sqlDB.Close()
+	}
 }
 
 func grantLocalAppRole(t *testing.T, userUID string, role model.AppRole, enabled bool) {

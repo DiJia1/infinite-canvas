@@ -4,10 +4,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/basketikun/infinite-canvas/config"
+	"github.com/basketikun/infinite-canvas/internal/testpostgres"
 	"github.com/basketikun/infinite-canvas/model"
 	"github.com/basketikun/infinite-canvas/repository"
 	"github.com/basketikun/infinite-canvas/service"
@@ -15,14 +15,26 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	directory, err := os.MkdirTemp("", "infinite-canvas-middleware-test-")
+	schema, err := testpostgres.NewSchema("middleware")
 	if err != nil {
 		panic(err)
 	}
-	config.Cfg = config.Config{StorageDriver: "sqlite", DatabaseDSN: filepath.Join(directory, "middleware.db")}
+	config.Cfg = config.Config{StorageDriver: "postgres", DatabaseDSN: schema.DSN}
 	code := m.Run()
-	_ = os.RemoveAll(directory)
+	closeRepositoryPool()
+	_ = schema.Close()
 	os.Exit(code)
+}
+
+func closeRepositoryPool() {
+	database, _ := repository.DB()
+	if database == nil {
+		return
+	}
+	sqlDB, err := database.DB()
+	if err == nil {
+		_ = sqlDB.Close()
+	}
 }
 
 func grantLocalRole(t *testing.T, userUID string, role model.AppRole, enabled bool) {
