@@ -12,6 +12,18 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: infinite_canvas_test
+          POSTGRES_USER: infinite_canvas_test_user
+          POSTGRES_PASSWORD: Canvas_Test_2026
+        options: >-
+          --health-cmd "pg_isready -U infinite_canvas_test_user -d infinite_canvas_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      TEST_DATABASE_DSN: postgres://infinite_canvas_test_user:Canvas_Test_2026@localhost:5432/infinite_canvas_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 

@@ -61,6 +61,9 @@ func TestReleaseWorkflowBuildsAndDeploysPrivateImageSecurely(t *testing.T) {
 	workflow := readDeploymentFile(t, ".github/workflows/docker-image.yml")
 	for _, expected := range []string{
 		"go test ./...",
+		"postgres:17-alpine",
+		"TEST_DATABASE_DSN",
+		"pg_isready",
 		"bun test",
 		"bun run typecheck",
 		"bun run build",

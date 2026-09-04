@@ -1,0 +1,13 @@
+services:
+  postgres-test:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: infinite_canvas_test
+      POSTGRES_USER: infinite_canvas_test_user
+      POSTGRES_PASSWORD: Canvas_Test_2026
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infinite_canvas_test_user -d infinite_canvas_test"]
