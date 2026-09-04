@@ -2,14 +2,9 @@ package model
 
 import (
 	"encoding/json"
-
-	"gorm.io/gorm"
-	"gorm.io/gorm/schema"
 )
 
-// CanvasProjectDocument keeps the JSON serialization used by all databases
-// while requesting a MySQL type that can never narrow an existing LONGTEXT
-// column during AutoMigrate.
+// CanvasProjectDocument keeps the JSON serialization used for canvas documents.
 type CanvasProjectDocument json.RawMessage
 
 func (document CanvasProjectDocument) MarshalJSON() ([]byte, error) {
@@ -18,13 +13,6 @@ func (document CanvasProjectDocument) MarshalJSON() ([]byte, error) {
 
 func (document *CanvasProjectDocument) UnmarshalJSON(value []byte) error {
 	return (*json.RawMessage)(document).UnmarshalJSON(value)
-}
-
-func (CanvasProjectDocument) GormDBDataType(database *gorm.DB, _ *schema.Field) string {
-	if database.Dialector.Name() == "mysql" {
-		return "LONGTEXT"
-	}
-	return ""
 }
 
 // CanvasProject stores one Portal user's canvas metadata and graph document.

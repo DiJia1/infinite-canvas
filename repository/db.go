@@ -2,16 +2,12 @@ package repository
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/basketikun/infinite-canvas/config"
 	"github.com/basketikun/infinite-canvas/model"
-	"github.com/glebarez/sqlite"
-	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -25,22 +21,14 @@ var (
 // DB 初始化并返回全局数据库连接。
 func DB() (*gorm.DB, error) {
 	dbOnce.Do(func() {
-		driver := strings.ToLower(strings.TrimSpace(config.Cfg.StorageDriver))
-		if driver == "" {
-			driver = "sqlite"
-		}
-		dsn := config.Cfg.DatabaseDSN
-		if driver == "sqlite" && dsn != ":memory:" {
-			_ = os.MkdirAll(filepath.Dir(dsn), 0755)
-		}
-		db, dbErr = gorm.Open(dialector(driver, dsn), &gorm.Config{})
+		db, dbErr = gorm.Open(postgres.Open(config.Cfg.DatabaseDSN), &gorm.Config{})
 		if dbErr != nil {
 			return
 		}
 		if dbErr = configureConnectionPool(db); dbErr != nil {
 			return
 		}
-		if dbErr = migrateCanvasProjectPrimaryKey(db, driver); dbErr != nil {
+		if dbErr = migratePostgresCanvasProjectPrimaryKey(db); dbErr != nil {
 			return
 		}
 		dbErr = db.AutoMigrate(
@@ -62,75 +50,13 @@ func DB() (*gorm.DB, error) {
 	return db, dbErr
 }
 
-// migrateCanvasProjectPrimaryKey upgrades the short-lived first canvas schema,
-// whose primary key was only id, before any owner-scoped upserts are used.
+// migratePostgresCanvasProjectPrimaryKey upgrades the short-lived first canvas
+// schema, whose primary key was only id, before owner-scoped upserts are used.
 // Fresh databases have no table yet and are created directly by AutoMigrate.
-func migrateCanvasProjectPrimaryKey(database *gorm.DB, driver string) error {
+func migratePostgresCanvasProjectPrimaryKey(database *gorm.DB) error {
 	if !database.Migrator().HasTable("canvas_projects") {
 		return nil
 	}
-	switch driver {
-	case "postgres", "postgresql":
-		return migratePostgresCanvasProjectPrimaryKey(database)
-	case "mysql":
-		return migrateMySQLCanvasProjectPrimaryKey(database)
-	default:
-		return migrateSQLiteCanvasProjectPrimaryKey(database)
-	}
-}
-
-type sqliteTableInfo struct {
-	Name string
-	PK   int
-}
-
-func migrateSQLiteCanvasProjectPrimaryKey(database *gorm.DB) error {
-	columns := make([]sqliteTableInfo, 0)
-	if err := database.Raw("PRAGMA table_info(canvas_projects)").Scan(&columns).Error; err != nil {
-		return err
-	}
-	if !hasLegacyCanvasProjectPrimaryKey(columns) {
-		return nil
-	}
-	return database.Transaction(func(transaction *gorm.DB) error {
-		if err := transaction.Exec("ALTER TABLE canvas_projects RENAME TO canvas_projects_legacy_primary_key").Error; err != nil {
-			return err
-		}
-		if err := transaction.Exec(`CREATE TABLE canvas_projects (
-			id TEXT,
-			owner_uid TEXT,
-			title TEXT,
-			document TEXT,
-			revision INTEGER,
-			created_at TEXT,
-			updated_at TEXT,
-			PRIMARY KEY (id, owner_uid)
-		)`).Error; err != nil {
-			return err
-		}
-		if err := transaction.Exec(`INSERT INTO canvas_projects (id, owner_uid, title, document, revision, created_at, updated_at)
-			SELECT id, owner_uid, title, document, revision, created_at, updated_at FROM canvas_projects_legacy_primary_key`).Error; err != nil {
-			return err
-		}
-		return transaction.Exec("DROP TABLE canvas_projects_legacy_primary_key").Error
-	})
-}
-
-func hasLegacyCanvasProjectPrimaryKey(columns []sqliteTableInfo) bool {
-	for _, column := range columns {
-		if column.Name == "id" && column.PK == 1 {
-			for _, other := range columns {
-				if other.Name != "id" && other.PK != 0 {
-					return false
-				}
-			}
-			return true
-		}
-	}
-	return false
-}
-
-func migratePostgresCanvasProjectPrimaryKey(database *gorm.DB) error {
 	var columns string
 	if err := database.Raw(`SELECT COALESCE(string_agg(attribute.attname, ',' ORDER BY array_position(index_definition.indkey, attribute.attnum)), '')
 		FROM pg_index index_definition
@@ -158,19 +84,6 @@ func migratePostgresCanvasProjectPrimaryKey(database *gorm.DB) error {
 
 func quotePostgresIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
-}
-
-func migrateMySQLCanvasProjectPrimaryKey(database *gorm.DB) error {
-	var columns string
-	if err := database.Raw(`SELECT COALESCE(GROUP_CONCAT(column_name ORDER BY ordinal_position SEPARATOR ','), '')
-		FROM information_schema.key_column_usage
-		WHERE table_schema = DATABASE() AND table_name = ? AND constraint_name = 'PRIMARY'`, "canvas_projects").Scan(&columns).Error; err != nil {
-		return err
-	}
-	if columns != "id" {
-		return nil
-	}
-	return database.Exec("ALTER TABLE canvas_projects DROP PRIMARY KEY, ADD PRIMARY KEY (id, owner_uid)").Error
 }
 
 func configureConnectionPool(database *gorm.DB) error {
@@ -211,15 +124,4 @@ func configureConnectionPool(database *gorm.DB) error {
 	sqlDB.SetMaxIdleConns(maxIdleConns)
 	sqlDB.SetConnMaxLifetime(maxLifetime)
 	return nil
-}
-
-func dialector(driver string, dsn string) gorm.Dialector {
-	switch driver {
-	case "mysql":
-		return mysql.Open(dsn)
-	case "postgres", "postgresql":
-		return postgres.Open(dsn)
-	default:
-		return sqlite.Open(dsn)
-	}
 }

@@ -34,7 +34,7 @@ func newRepositoryTestConfig(t *testing.T, prefix string) config.Config {
 			t.Errorf("drop repository test schema: %v", err)
 		}
 	})
-	return config.Config{StorageDriver: "postgres", DatabaseDSN: schema.DSN}
+	return config.Config{DatabaseDSN: schema.DSN}
 }
 
 func closeRepositoryTestDB() error {

@@ -19,7 +19,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	config.Cfg = config.Config{StorageDriver: "postgres", DatabaseDSN: schema.DSN}
+	config.Cfg = config.Config{DatabaseDSN: schema.DSN}
 	code := m.Run()
 	closeRepositoryPool()
 	_ = schema.Close()

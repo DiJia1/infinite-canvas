@@ -21,7 +21,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	config.Cfg = config.Config{
-		StorageDriver: "postgres", DatabaseDSN: schema.DSN,
+		DatabaseDSN:  schema.DSN,
 		MediaStorage: "local", MediaLocalDir: directory,
 	}
 	if _, err := repository.DB(); err != nil {

@@ -7,8 +7,7 @@ import (
 
 type Config struct {
 	Port                           string   `env:"PORT" envDefault:"8082"`
-	StorageDriver                  string   `env:"STORAGE_DRIVER" envDefault:"sqlite"`
-	DatabaseDSN                    string   `env:"DATABASE_DSN" envDefault:"data/infinite-canvas.db"`
+	DatabaseDSN                    string   `env:"DATABASE_DSN,required"`
 	DatabaseMaxOpenConns           int      `env:"DB_MAX_OPEN_CONNS" envDefault:"20"`
 	DatabaseMaxIdleConns           int      `env:"DB_MAX_IDLE_CONNS" envDefault:"10"`
 	DatabaseConnMaxLifetime        string   `env:"DB_CONN_MAX_LIFETIME" envDefault:"30m"`
