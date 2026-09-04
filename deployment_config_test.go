@@ -91,6 +91,34 @@ func TestReleaseWorkflowBuildsAndDeploysPrivateImageSecurely(t *testing.T) {
 	}
 }
 
+func TestDatabaseConfigurationIsPostgresOnly(t *testing.T) {
+	example := readDeploymentFile(t, ".env.example")
+	workflow := readDeploymentFile(t, ".github/workflows/docker-image.yml")
+	combined := example + workflow
+
+	storageDriver := strings.Join([]string{"STORAGE", "DRIVER"}, "_")
+	localDatabaseFile := strings.Join([]string{"data", "infinite-canvas.db"}, "/")
+	legacyDrivers := []string{
+		"gorm.io/driver/" + "sqlite",
+		"gorm.io/driver/" + "mysql",
+	}
+	for _, forbidden := range append([]string{storageDriver, localDatabaseFile}, legacyDrivers...) {
+		if strings.Contains(combined, forbidden) {
+			t.Fatalf("database configuration contains legacy setting %q", forbidden)
+		}
+	}
+
+	for _, required := range []string{
+		"DATABASE_DSN=postgres://",
+		"TEST_DATABASE_DSN",
+		"postgres:17-alpine",
+	} {
+		if !strings.Contains(combined, required) {
+			t.Fatalf("database configuration missing %q", required)
+		}
+	}
+}
+
 func TestReleaseScriptsProtectAndRestoreKnownGoodVersion(t *testing.T) {
 	deploy := readDeploymentFile(t, "scripts/deploy-production.sh")
 	initialize := readDeploymentFile(t, "scripts/initialize-release-state.sh")

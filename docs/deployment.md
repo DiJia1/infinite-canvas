@@ -17,7 +17,7 @@ https://www.semetaloa.com/apps/infinite-canvas/canvas
    mkdir -p /program/apps/infinite-canvas /program/data/infinite-canvas/media
    ```
 
-3. 在 `/program/apps/infinite-canvas/.env` 写入生产配置。文件不得提交到 Git，至少包含专属 PostgreSQL schema 的 `DATABASE_DSN`、OSS 配置、`PORTAL_DIRECTORY_SECRET`、`APP_RBAC_INITIAL_ADMIN_UIDS` 和 AI 供应商配置所需的运行变量。
+3. 在 `/program/apps/infinite-canvas/.env` 写入生产配置。文件不得提交到 Git，`DATABASE_DSN` 为必填项，必须连接到专属 PostgreSQL schema；应用没有数据库类型选择项，也不会创建本地数据库文件。该文件至少还包含 OSS 配置、`PORTAL_DIRECTORY_SECRET`、`APP_RBAC_INITIAL_ADMIN_UIDS` 和 AI 供应商配置所需的运行变量。
 4. 在 Portal 后台登记应用：
    - 应用键：`infinite-canvas`
    - 上游端口：`3000`
@@ -73,6 +73,17 @@ ghcr.io/dijia1/infinite-canvas:sha-<GITHUB_SHA>
 
 随后部署 Job 通过严格 known-host 校验连接服务器，上传该 SHA 对应的 Compose 与部署脚本，临时登录 GHCR、拉取指定镜像并重建唯一的 `app` 服务。
 
-部署在 60 秒内未达到健康状态时，会用最后健康 release 的 Compose 和镜像自动恢复。数据库仍沿用应用启动时的 GORM 自动迁移；回滚不会回退数据库 schema 或数据。
+部署在 60 秒内未达到健康状态时，会用最后健康 release 的 Compose 和镜像自动恢复。数据库仍沿用应用启动时的 GORM 自动迁移；应用镜像回滚不会回退数据库 schema 或数据。
+
+## PostgreSQL 变更前的备份与恢复验证
+
+在发布会改变数据库运行方式、模型或迁移逻辑的版本前，先由生产数据库操作人员完成以下验证，再允许部署：
+
+1. 在不停写的生产库上创建 Infinite Canvas 专属 schema 的一致性备份；不要导出或修改其他应用的 schema。
+2. 将备份恢复到隔离的 PostgreSQL 实例或数据库中，绝不覆盖生产库。
+3. 对比恢复前后的各表行数，并用当前或待发布镜像连接隔离库，验证能够读取画布、媒体、图片任务、Portal 成员和应用内角色。
+4. 记录备份位置、恢复结果和验证时间；失败时停止发布，先解决恢复问题。
+
+该验证只证明备份可恢复，不会替代常规数据库备份策略，也不应通过回滚应用镜像来尝试回退已执行的数据库迁移。
 
 Portal 验收应分别验证：未登录用户跳转登录页、无权限用户显示禁止页，以及被授权用户可进入 `/apps/infinite-canvas/canvas`。目录同步回调通过 `portal_directory` 网络访问 `infinite-canvas-directory:3000`。
