@@ -9,7 +9,7 @@ import (
 
 func TestUpdateOperationLogCompletesSubmittedImageTask(t *testing.T) {
 	useImageTaskTestDB(t)
-	createdAt := time.Now().UTC().Add(-time.Minute)
+	createdAt := time.Date(2026, time.September, 7, 9, 53, 58, 925680123, time.UTC)
 	item := model.OperationLog{
 		ID:         "operation-image-task",
 		ActorUID:   "user-1",
@@ -30,6 +30,11 @@ func TestUpdateOperationLogCompletesSubmittedImageTask(t *testing.T) {
 	if err != nil || len(items) != 1 || items[0].Status != model.OperationStatusSubmitted {
 		t.Fatalf("submitted operation log = %#v, %v", items, err)
 	}
+	// PostgreSQL stores microseconds; compare persisted values across the update.
+	persistedCreatedAt := items[0].CreatedAt
+	if !persistedCreatedAt.Equal(createdAt.Truncate(time.Microsecond)) {
+		t.Fatalf("persisted created_at = %s, input = %s", persistedCreatedAt.Format(time.RFC3339Nano), createdAt.Format(time.RFC3339Nano))
+	}
 
 	if err := UpdateOperationLog(item.ID, map[string]any{
 		"status":           model.OperationStatusSuccess,
@@ -44,8 +49,11 @@ func TestUpdateOperationLogCompletesSubmittedImageTask(t *testing.T) {
 	if err != nil || len(items) != 1 {
 		t.Fatalf("ListOperationLogs() = %#v, %v", items, err)
 	}
-	if items[0].Status != model.OperationStatusSuccess || len(items[0].MediaIDs) != 1 || items[0].MediaIDs[0] != "media-1" || items[0].ProviderTaskID != "maizi-task-123" || !items[0].CreatedAt.Equal(createdAt) {
+	if items[0].Status != model.OperationStatusSuccess || len(items[0].MediaIDs) != 1 || items[0].MediaIDs[0] != "media-1" || items[0].ProviderTaskID != "maizi-task-123" {
 		t.Fatalf("updated operation log = %#v", items[0])
+	}
+	if !items[0].CreatedAt.Equal(persistedCreatedAt) {
+		t.Fatalf("update changed created_at: before = %s, after = %s", persistedCreatedAt.Format(time.RFC3339Nano), items[0].CreatedAt.Format(time.RFC3339Nano))
 	}
 }
 
