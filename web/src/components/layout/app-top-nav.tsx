@@ -17,7 +17,7 @@ import { navigationTools, type NavigationToolSlug } from "@/constant/navigation-
 import { appPath } from "@/lib/app-path";
 import { cn } from "@/lib/utils";
 import { toggleMaterialPanel, type MaterialPanel } from "@/components/layout/material-panel";
-import { fetchPortalSession } from "@/services/api/session";
+import { portalSessionQuery } from "@/services/api/session";
 import { resolveSelectedModel, type AIModelChoice } from "@/lib/model-selection";
 import { useConfigStore } from "@/stores/use-config-store";
 
@@ -26,7 +26,7 @@ export function AppTopNav() {
     const [mobileNavOpen, setMobileNavOpen] = useState(false);
     const [materialPanel, setMaterialPanel] = useState<MaterialPanel>(null);
     const hideHeader = /^\/canvas\/[^/]+/.test(pathname);
-    const session = useQuery({ queryKey: ["portal-session"], queryFn: fetchPortalSession, enabled: !hideHeader, retry: false, staleTime: 5 * 60 * 1000 });
+    const session = useQuery({ ...portalSessionQuery, enabled: !hideHeader });
     const slug = pathname.split("/").filter(Boolean)[0];
     const activeToolSlug = navigationTools.some((tool) => tool.slug === slug) ? (slug as NavigationToolSlug) : undefined;
 	const aiStatus = useConfigStore((state) => state.status);

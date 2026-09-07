@@ -10,3 +10,11 @@ export type PortalSession = {
 export function fetchPortalSession() {
     return apiGet<PortalSession>("/api/session");
 }
+
+export const portalSessionQuery = {
+    queryKey: ["portal-session"] as const,
+    queryFn: fetchPortalSession,
+    retry: false,
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: "always" as const,
+};

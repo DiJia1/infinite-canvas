@@ -3,6 +3,8 @@
 import type { ReactNode } from "react";
 import { useEffect } from "react";
 import { usePathname } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
+import { portalSessionQuery } from "@/services/api/session";
 
 import { useCanvasStore } from "@/app/(user)/canvas/stores/use-canvas-store";
 import { useConfigStore } from "@/stores/use-config-store";
@@ -15,24 +17,18 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
     const hydrateAssets = useAssetStore((state) => state.hydrate);
     const loadPublicSettings = useConfigStore((state) => state.loadPublicSettings);
     const pathname = usePathname();
+    const session = useQuery(portalSessionQuery);
+    const uid = session.isPending ? undefined : session.isError ? "guest" : session.data?.user?.uid || "guest";
 
     useEffect(() => {
         void loadPublicSettings();
     }, [loadPublicSettings, pathname]);
 
     useEffect(() => {
+        if (uid === undefined) return;
         let disposed = false;
         let bootstrapRetry: ReturnType<typeof retryCanvasBootstrapOnOnline> | null = null;
         void (async () => {
-            let uid = "guest";
-            try {
-                const response = await fetch(`${process.env.NEXT_PUBLIC_BASE_PATH || ""}/api/session`);
-                const payload = (await response.json()) as { code?: number; data?: { user?: { uid?: string } } };
-                uid = payload.code === 0 && payload.data?.user?.uid ? payload.data.user.uid : "guest";
-            } catch {
-                uid = "guest";
-            }
-
             setImageStorageScope(uid);
             await Promise.all([hydrateCanvas(uid), hydrateAssets(uid)]);
             if (disposed || uid === "guest") return;
@@ -63,7 +59,7 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
             bootstrapRetry?.dispose();
             useCanvasStore.getState().setBootstrapRetry(null);
         };
-    }, [hydrateAssets, hydrateCanvas]);
+    }, [hydrateAssets, hydrateCanvas, uid]);
 
     return <>{children}</>;
 }
