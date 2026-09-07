@@ -185,7 +185,7 @@ export function CanvasConfigNodePanel({ node, inputSummary, inputs, onConfigChan
                                 <PreviewSection title="图片提示词" count={imageInputs.length} empty="暂无图片提示词">
                                     <div className="thin-scrollbar flex gap-1.5 overflow-x-auto pb-1">
                                         {imageInputs.map((input, index) => (
-                                            <ImageSortCard key={input.nodeId} input={input} imageIndex={index} imageTotal={imageInputs.length} inputs={inputs} theme={theme} onMove={moveInput} />
+                                            <ImageSortCard key={input.nodeId} input={input} imageIndex={index} imageTotal={imageInputs.length} theme={theme} onMove={moveInput} />
                                         ))}
                                     </div>
                                 </PreviewSection>
@@ -195,7 +195,7 @@ export function CanvasConfigNodePanel({ node, inputSummary, inputs, onConfigChan
                                     <PreviewSection title="文本提示词" count={textInputs.length} empty="暂无文本提示词">
                                         <div className="space-y-1.5">
                                             {textInputs.map((input, index) => (
-                                                <TextSortCard key={input.nodeId} input={input} textIndex={index} textTotal={textInputs.length} inputs={inputs} theme={theme} onMove={moveInput} onEdit={startTextEdit} />
+                                                <TextSortCard key={input.nodeId} input={input} textIndex={index} textTotal={textInputs.length} theme={theme} onMove={moveInput} onEdit={startTextEdit} />
                                             ))}
                                         </div>
                                     </PreviewSection>
@@ -274,7 +274,6 @@ function TextSortCard({
     input,
     textIndex,
     textTotal,
-    inputs,
     theme,
     onMove,
     onEdit,
@@ -282,7 +281,6 @@ function TextSortCard({
     input: NodeGenerationInput;
     textIndex: number;
     textTotal: number;
-    inputs: NodeGenerationInput[];
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     onMove: (input: NodeGenerationInput, offset: number) => void;
     onEdit: (input: NodeGenerationInput) => void;
@@ -306,14 +304,12 @@ function ImageSortCard({
     input,
     imageIndex,
     imageTotal,
-    inputs,
     theme,
     onMove,
 }: {
     input: NodeGenerationInput;
     imageIndex: number;
     imageTotal: number;
-    inputs: NodeGenerationInput[];
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     onMove: (input: NodeGenerationInput, offset: number) => void;
 }) {

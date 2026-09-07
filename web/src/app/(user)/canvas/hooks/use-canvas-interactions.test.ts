@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { applyNodeDragPositions, createCanvasInteractionController } from "./use-canvas-interactions.ts";
-import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type Position, type ViewportTransform } from "../types.ts";
+import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type ViewportTransform } from "../types.ts";
 
 type Ref<T> = { current: T };
 

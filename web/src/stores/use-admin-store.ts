@@ -16,7 +16,7 @@ type AdminStore = {
 
 export const useAdminStore = create<AdminStore>()(
     persist(
-        (set, get) => ({
+        (set) => ({
             token: "",
             user: null,
             isReady: false,

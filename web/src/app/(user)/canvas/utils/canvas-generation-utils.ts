@@ -1,7 +1,6 @@
 import { normalizeImageBackground, normalizeImageOutputFormat } from "../../../../lib/image-output-config.ts";
 import { normalizePersistedAiConfig, type AiConfig } from "../../../../lib/ai-config";
 import type { ReferenceImage } from "../../../../types/image";
-import { normalizeImageMask } from "../image-mask/mask-utils";
 import { resolveCanvasNodeMask, type CanvasMaskResources } from "../image-mask/mask-resources";
 import { CanvasNodeType, type CanvasConnection, type CanvasImageGenerationType, type CanvasNodeData, type CanvasNodeMetadata } from "../types.ts";
 

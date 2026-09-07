@@ -253,7 +253,6 @@ function InfiniteCanvasPage() {
     const resumedLocalUploadKeysRef = useRef<Set<string>>(new Set());
     const privateAssetRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    const config = useConfigStore((state) => state.config);
     const effectiveConfig = useEffectiveConfig();
     const aiStatus = useConfigStore((state) => state.status);
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);

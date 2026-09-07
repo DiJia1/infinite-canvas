@@ -23,15 +23,6 @@ export function getDataUrlByteSize(dataUrl: string) {
     return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
 }
 
-export function readFileAsDataUrl(file: File) {
-    return new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ""));
-        reader.onerror = () => reject(new Error("读取图片失败"));
-        reader.readAsDataURL(file);
-    });
-}
-
 export function readImageMeta(dataUrl: string) {
     return new Promise<{ width: number; height: number; mimeType: string }>((resolve) => {
         const image = new Image();

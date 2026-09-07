@@ -725,7 +725,6 @@ export function createCanvasStore(options: CanvasStoreOptions = {}): UseBoundSto
                         if (deletableIDs.length === 0) return;
                         set((state) => ({ projects: state.projects.filter((project) => !deletableIDs.includes(project.id)) }));
                         for (const id of deletableIDs) {
-                            const metadata = current.projectSync[id];
                             const timer = saveTimers.get(id);
                             if (timer) clearTimeout(timer);
                             saveTimers.delete(id);
