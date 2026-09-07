@@ -1,8 +1,11 @@
+import { formatCNYAmount } from "./money";
+
 export type ImageRequestFieldType = "select" | "boolean" | "text" | "number";
 
 export type ImageRequestFieldOption = {
     value: string;
     label: string;
+    price?: string;
 };
 
 export type ImageRequestField = {
@@ -41,6 +44,10 @@ export function normalizeImageRequestOptions(schema: ImageRequestSchema | undefi
 export function schemaOptionString(options: ImageRequestOptions | undefined, key: string): string {
     const value = options?.[key];
     return typeof value === "string" ? value : "";
+}
+
+export function imageRequestOptionLabel(option: ImageRequestFieldOption) {
+    return option.price ? `${option.label} · ${formatCNYAmount(option.price)}` : option.label;
 }
 
 function isValidOption(field: ImageRequestField, value: unknown): boolean {

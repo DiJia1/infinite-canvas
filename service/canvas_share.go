@@ -179,7 +179,7 @@ func canvasShareSourceMedia(user PortalUser, ids []string) (map[string]model.Med
 		if err != nil {
 			return nil, err
 		}
-		if !found {
+		if !found || item.CleanupStatus == model.MediaCleanupDeleting {
 			return nil, canvasProjectValidationError{message: "画布图片不存在"}
 		}
 		_, public, err := repository.GetPublicImageByMediaID(item.ID)

@@ -4,7 +4,19 @@ import test from "node:test";
 import type { AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "../types.ts";
-import { buildAngleLabel, buildAnglePrompt, buildGenerationConfig, buildImageGenerationMetadata, findRetrySourceNode, getGenerationCount, getInputSummary, replaceNodeWithUploadedVideo, resetInterruptedGeneration, snapshotConfigNodeProviderSelection, sourceNodeReferenceImages } from "./canvas-generation-utils.ts";
+import {
+    buildAngleLabel,
+    buildAnglePrompt,
+    buildGenerationConfig,
+    buildImageGenerationMetadata,
+    findRetrySourceNode,
+    getGenerationCount,
+    getInputSummary,
+    replaceNodeWithUploadedVideo,
+    resetInterruptedGeneration,
+    snapshotConfigNodeProviderSelection,
+    sourceNodeReferenceImages,
+} from "./canvas-generation-utils.ts";
 
 const config: AiConfig = {
     videoSeconds: "6",
@@ -59,7 +71,7 @@ test("builds edit metadata with persisted or remote references only", () => {
         size: "3:2",
         resolution: "4k",
         outputFormat: "jpeg",
-		background: "auto",
+        background: "auto",
         quality: "high",
         count: 2,
         references: ["media:reference", "https://example.test/reference.png"],
@@ -83,7 +95,7 @@ test("does not persist inline mask strokes when no stable mask resource ID exist
         size: "1:1",
         resolution: "1k",
         outputFormat: "jpeg",
-		background: "auto",
+        background: "auto",
         quality: "auto",
         count: 1,
         references: ["media:masked"],
@@ -111,7 +123,9 @@ test("persists one mask resource ID instead of duplicating mask strokes in gener
 });
 
 test("normalizes node config without copying historical model fields", () => {
-    const historicalConfig = JSON.parse(JSON.stringify({ ...config, model: "legacy-model", imageModel: "legacy-image-model", videoModel: "legacy-video-model", textModel: "legacy-text-model", models: ["legacy-model"], systemPrompt: "legacy prompt" })) as AiConfig;
+    const historicalConfig = JSON.parse(
+        JSON.stringify({ ...config, model: "legacy-model", imageModel: "legacy-image-model", videoModel: "legacy-video-model", textModel: "legacy-text-model", models: ["legacy-model"], systemPrompt: "legacy prompt" }),
+    ) as AiConfig;
     const configuredNode = JSON.parse(
         '{"id":"configured","type":"config","title":"configured","position":{"x":0,"y":0},"width":100,"height":100,"metadata":{"model":"node-model","quality":"node-quality","size":"4:3","resolution":"2048x1024","seconds":"12","vquality":"4k","count":3}}',
     ) as CanvasNodeData;
@@ -128,7 +142,7 @@ test("normalizes node config without copying historical model fields", () => {
         {
             quality: "node-quality",
             size: "4:3",
-            resolution: "2k",
+            resolution: "2048x1024",
             videoSeconds: "12",
             vquality: "4k",
             count: "3",
@@ -140,16 +154,9 @@ test("normalizes node config without copying historical model fields", () => {
 });
 
 test("replacing historical metadata with an uploaded video removes its obsolete model", () => {
-    const historicalNode = JSON.parse(
-        '{"id":"source","type":"image","title":"source","position":{"x":10,"y":20},"width":340,"height":240,"metadata":{"model":"historical-model","assetId":"asset-to-keep","errorDetails":"old error"}}',
-    ) as CanvasNodeData;
+    const historicalNode = JSON.parse('{"id":"source","type":"image","title":"source","position":{"x":10,"y":20},"width":340,"height":240,"metadata":{"model":"historical-model","assetId":"asset-to-keep","errorDetails":"old error"}}') as CanvasNodeData;
 
-    const result = replaceNodeWithUploadedVideo(
-        historicalNode,
-        "replacement.mp4",
-        { content: "blob:video", storageKey: "video:1", status: "success", bytes: 12, mimeType: "video/mp4", naturalWidth: 1280, naturalHeight: 720 },
-        { width: 420, height: 236 },
-    );
+    const result = replaceNodeWithUploadedVideo(historicalNode, "replacement.mp4", { content: "blob:video", storageKey: "video:1", status: "success", bytes: 12, mimeType: "video/mp4", naturalWidth: 1280, naturalHeight: 720 }, { width: 420, height: 236 });
 
     assert.equal(result.type, CanvasNodeType.Video);
     assert.equal("model" in (result.metadata || {}), false);
@@ -159,33 +166,33 @@ test("replacing historical metadata with an uploaded video removes its obsolete 
 });
 
 test("keeps a selected video provider when building a video task config", () => {
-	const selected = buildGenerationConfig({ ...config, videoProviderId: "video-provider" }, undefined, fallbackConfig);
-	assert.equal(selected.videoProviderId, "video-provider");
+    const selected = buildGenerationConfig({ ...config, videoProviderId: "video-provider" }, undefined, fallbackConfig);
+    assert.equal(selected.videoProviderId, "video-provider");
 });
 
 test("snapshots an old config node's selected providers before global defaults change", () => {
-	const oldConfigNode = node("config", CanvasNodeType.Config, { quality: "high" });
-	const initialConfig = {
-		...config,
-		imageProviderId: "maizi",
-		imageProviderType: "maizi-image",
-		imageRequestSchemaVersion: "v1",
-		providerOptions: { size: "1:1", resolution: "1k" },
-		videoProviderId: "doubao-video",
-	};
-	const snapshot = snapshotConfigNodeProviderSelection([oldConfigNode], initialConfig);
-	assert.deepEqual(snapshot[0]?.metadata, {
-		quality: "high",
-		imageProviderId: "maizi",
-		imageProviderType: "maizi-image",
-		imageRequestSchemaVersion: "v1",
-		providerOptions: { size: "1:1", resolution: "1k" },
-		videoProviderId: "doubao-video",
-	});
+    const oldConfigNode = node("config", CanvasNodeType.Config, { quality: "high" });
+    const initialConfig = {
+        ...config,
+        imageProviderId: "maizi",
+        imageProviderType: "maizi-image",
+        imageRequestSchemaVersion: "v1",
+        providerOptions: { size: "1:1", resolution: "1k" },
+        videoProviderId: "doubao-video",
+    };
+    const snapshot = snapshotConfigNodeProviderSelection([oldConfigNode], initialConfig);
+    assert.deepEqual(snapshot[0]?.metadata, {
+        quality: "high",
+        imageProviderId: "maizi",
+        imageProviderType: "maizi-image",
+        imageRequestSchemaVersion: "v1",
+        providerOptions: { size: "1:1", resolution: "1k" },
+        videoProviderId: "doubao-video",
+    });
 
-	const afterGlobalChange = snapshotConfigNodeProviderSelection(snapshot, { ...initialConfig, imageProviderId: "seedream", imageProviderType: "doubao-seedream-5-pro" });
-	assert.equal(afterGlobalChange[0]?.metadata?.imageProviderId, "maizi");
-	assert.equal(afterGlobalChange[0]?.metadata?.imageProviderType, "maizi-image");
+    const afterGlobalChange = snapshotConfigNodeProviderSelection(snapshot, { ...initialConfig, imageProviderId: "seedream", imageProviderType: "doubao-seedream-5-pro" });
+    assert.equal(afterGlobalChange[0]?.metadata?.imageProviderId, "maizi");
+    assert.equal(afterGlobalChange[0]?.metadata?.imageProviderType, "maizi-image");
 });
 
 test("keeps node-local provider options after global provider settings change", () => {
@@ -237,19 +244,19 @@ test("uses the current provider resolution for legacy nodes without a provider s
     assert.equal(resolved.resolution, "1.5k");
 });
 
-test("normalizes the stored resolution for legacy generic nodes", () => {
+test("preserves the stored upstream resolution for legacy generic nodes", () => {
     const legacyNode = node("legacy", CanvasNodeType.Config, { resolution: "2048x1024" });
 
     const resolved = buildGenerationConfig(config, legacyNode, fallbackConfig);
 
-    assert.equal(resolved.resolution, "2k");
+    assert.equal(resolved.resolution, "2048x1024");
 });
 
 test("preserves provider-specific resolutions and request options", () => {
-	const seedream = buildGenerationConfig({ ...config, imageProviderType: "doubao-seedream-5-pro", imageRequestSchemaVersion: "v1", resolution: "1.5k", providerOptions: { resolution: "1.5k", watermark: false } }, undefined, fallbackConfig);
-	assert.equal(seedream.resolution, "1.5k");
-	assert.deepEqual(seedream.providerOptions, { resolution: "1.5k", watermark: false });
-	assert.deepEqual(buildImageGenerationMetadata("generation", seedream, 1, []).providerOptions, { resolution: "1.5k", watermark: false });
+    const seedream = buildGenerationConfig({ ...config, imageProviderType: "doubao-seedream-5-pro", imageRequestSchemaVersion: "v1", resolution: "1.5k", providerOptions: { resolution: "1.5k", watermark: false } }, undefined, fallbackConfig);
+    assert.equal(seedream.resolution, "1.5k");
+    assert.deepEqual(seedream.providerOptions, { resolution: "1.5k", watermark: false });
+    assert.deepEqual(buildImageGenerationMetadata("generation", seedream, 1, []).providerOptions, { resolution: "1.5k", watermark: false });
 });
 
 test("falls back to supplied defaults when generation config is empty", () => {

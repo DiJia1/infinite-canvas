@@ -1,4 +1,6 @@
 import { apiGet, apiPost } from "@/services/api/request";
+import type { ImageRequestSchema } from "@/lib/image-request-schema";
+import type { ImageResolutionPrice } from "@/lib/image-pricing";
 
 export const ADMIN_AUTH_TOKEN_KEY = "infinite-canvas-admin-auth-token-v1";
 
@@ -17,7 +19,7 @@ export type AdminAIProvider = {
     name: string;
     type: string;
     enabled: boolean;
-    imageCallAmount: string;
+    imagePrices: ImageResolutionPrice[];
     config: Record<string, unknown>;
 };
 
@@ -26,6 +28,7 @@ export type AdminAIProviderType = {
     name: string;
     capabilities: Array<"image_generate" | "image_edit" | "video_generate">;
     configFields: Array<{ key: string; label: string; type: "text" | "password"; placeholder?: string; required: boolean }>;
+    imageRequestSchema?: ImageRequestSchema;
 };
 
 export type AdminAISettings = {

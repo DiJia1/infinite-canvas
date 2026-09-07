@@ -5,7 +5,7 @@ import { Empty, Table, Tabs } from "antd";
 import { useState } from "react";
 
 import { formatCNYAmount } from "@/lib/money";
-import type { StatisticsModel, StatisticsUser } from "@/services/api/admin-statistics";
+import type { StatisticsModel, StatisticsResolution, StatisticsUser } from "@/services/api/admin-statistics";
 
 type StatisticsReportTabsProps = {
     users: StatisticsUser[];
@@ -75,11 +75,36 @@ function UsageMetric({ label, value }: { label: string; value: string }) {
 }
 
 function ModelUsageTable({ models, compact = false }: { models: StatisticsModel[]; compact?: boolean }) {
-    return <Table<StatisticsModel> size={compact ? "small" : "middle"} rowKey={(item) => `${item.providerId}-${item.providerName}`} pagination={false} dataSource={models} locale={{ emptyText: "暂无模型消耗" }} columns={modelColumns} />;
+    return (
+        <Table<StatisticsModel>
+            size={compact ? "small" : "middle"}
+            rowKey={(item) => `${item.providerId}-${item.providerName}`}
+            pagination={false}
+            dataSource={models}
+            locale={{ emptyText: "暂无模型消耗" }}
+            columns={modelColumns}
+            expandable={{
+                rowExpandable: (item) => (item.resolutions?.length ?? 0) > 0,
+                expandedRowRender: (item) => <ResolutionUsageTable resolutions={item.resolutions ?? []} />,
+            }}
+        />
+    );
+}
+
+function ResolutionUsageTable({ resolutions }: { resolutions: StatisticsResolution[] }) {
+    return <Table<StatisticsResolution> size="small" rowKey={(item) => item.resolution || "__unrecorded-resolution"} pagination={false} dataSource={resolutions} columns={resolutionColumns} />;
 }
 
 const modelColumns = [
     { title: "模型", render: (_: unknown, item: StatisticsModel) => item.providerName || item.providerId || "未知模型" },
+    { title: "成功调用", dataIndex: "successfulCalls", align: "right" as const },
+    { title: "成功图片", dataIndex: "imageCount", align: "right" as const, render: (value: number) => `${value} 张` },
+    { title: "费用", dataIndex: "amount", align: "right" as const, render: (value: string) => formatCNYAmount(value) },
+    { title: "未计价图片", dataIndex: "unpricedImageCount", align: "right" as const, render: (value: number) => (value ? `${value} 张` : "—") },
+];
+
+const resolutionColumns = [
+    { title: "图片规格", dataIndex: "resolution", render: (value: string) => value || "未记录规格" },
     { title: "成功调用", dataIndex: "successfulCalls", align: "right" as const },
     { title: "成功图片", dataIndex: "imageCount", align: "right" as const, render: (value: number) => `${value} 张` },
     { title: "费用", dataIndex: "amount", align: "right" as const, render: (value: string) => formatCNYAmount(value) },

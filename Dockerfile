@@ -13,7 +13,10 @@ ARG NEXT_PUBLIC_BASE_PATH=/apps/infinite-canvas
 ENV NEXT_PUBLIC_BASE_PATH=$NEXT_PUBLIC_BASE_PATH
 COPY --from=web-deps /app/web/node_modules ./node_modules
 COPY web ./
-RUN ./node_modules/.bin/next build
+# Production deployments must give changed client bundles new content-hashed URLs.
+# Turbopack's stable chunk paths combined with Next's immutable cache headers can
+# leave an already-open browser running chunks from the preceding deployment.
+RUN ./node_modules/.bin/next build --webpack
 
 # 构建 Go 后端入口。
 FROM golang:1.25-alpine AS api-build

@@ -91,7 +91,7 @@ func CreateCanvasProject(_ context.Context, user PortalUser, input CanvasProject
 	item := model.CanvasProject{ID: id, OwnerUID: user.UID, Title: title, Document: model.CanvasProjectDocument(document), Revision: 1, CreatedAt: createdAt, UpdatedAt: now()}
 	created, _, err := repository.CreateCanvasProject(item)
 	if err != nil {
-		return model.CanvasProject{}, err
+		return model.CanvasProject{}, canvasMediaSaveError(err)
 	}
 	return created, nil
 }
@@ -122,7 +122,7 @@ func ImportCanvasProjects(ctx context.Context, user PortalUser, inputs []CanvasP
 	}
 	imported, err := repository.ImportCanvasProjects(items)
 	if err != nil {
-		return model.CanvasProjectList{}, err
+		return model.CanvasProjectList{}, canvasMediaSaveError(err)
 	}
 	return model.CanvasProjectList{Items: imported, Total: len(imported)}, nil
 }
@@ -153,7 +153,7 @@ func UpdateCanvasProject(_ context.Context, user PortalUser, id string, input Ca
 			return model.CanvasProject{}, false, canvasProjectValidationError{message: "保存请求标识与原请求不一致"}
 		}
 		if err != nil {
-			return model.CanvasProject{}, false, err
+			return model.CanvasProject{}, false, canvasMediaSaveError(err)
 		}
 		if accepted {
 			return updated, deduplicated, nil
@@ -161,7 +161,7 @@ func UpdateCanvasProject(_ context.Context, user PortalUser, id string, input Ca
 	} else {
 		updated, accepted, err := repository.UpdateCanvasProject(user.UID, id, input.Revision, title, document, now())
 		if err != nil {
-			return model.CanvasProject{}, false, err
+			return model.CanvasProject{}, false, canvasMediaSaveError(err)
 		}
 		if accepted {
 			return updated, false, nil
@@ -429,4 +429,14 @@ func isTransientCanvasImageContent(value string) bool {
 		}
 	}
 	return false
+}
+
+func canvasMediaSaveError(err error) error {
+	if errors.Is(err, repository.ErrCanvasMediaUnavailable) {
+		return canvasProjectValidationError{message: "画布引用的图片不存在、无权访问或正在删除，请刷新后重试"}
+	}
+	if errors.Is(err, repository.ErrCanvasMediaInvalidDocument) {
+		return canvasProjectValidationError{message: "画布图片引用数据无效"}
+	}
+	return err
 }

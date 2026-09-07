@@ -1,19 +1,17 @@
-import { normalizeImageResolution } from "./image-generation-config";
-
 export type AiConfig = {
     videoSeconds: string;
     vquality: string;
     quality: string;
     size: string;
-	resolution: string;
-	outputFormat: string;
-	background?: string;
-	imageProviderId?: string;
-	videoProviderId?: string;
-	imageProviderType?: string;
-	imageRequestSchemaVersion?: string;
-	providerOptions?: Record<string, unknown>;
-	count: string;
+    resolution: string;
+    outputFormat: string;
+    background?: string;
+    imageProviderId?: string;
+    videoProviderId?: string;
+    imageProviderType?: string;
+    imageRequestSchemaVersion?: string;
+    providerOptions?: Record<string, unknown>;
+    count: string;
 };
 
 export const defaultAiConfig: AiConfig = {
@@ -21,7 +19,7 @@ export const defaultAiConfig: AiConfig = {
     vquality: "720",
     quality: "auto",
     size: "1:1",
-    resolution: "1k",
+    resolution: "",
     outputFormat: "jpeg",
     background: "auto",
     providerOptions: {},
@@ -37,13 +35,10 @@ export function normalizePersistedAiConfig(input: unknown): AiConfig {
         vquality: stringValue("vquality", defaultAiConfig.vquality),
         quality: stringValue("quality", defaultAiConfig.quality),
         size: stringValue("size", defaultAiConfig.size),
-        resolution: /^\s*\d+x\d+\s*$/i.test(resolution) ? normalizeImageResolution(resolution) : resolution,
+        resolution,
         outputFormat: stringValue("outputFormat", defaultAiConfig.outputFormat),
         background: stringValue("background", defaultAiConfig.background || "auto"),
-        providerOptions:
-            persisted.providerOptions && typeof persisted.providerOptions === "object" && !Array.isArray(persisted.providerOptions)
-                ? { ...(persisted.providerOptions as Record<string, unknown>) }
-                : {},
+        providerOptions: persisted.providerOptions && typeof persisted.providerOptions === "object" && !Array.isArray(persisted.providerOptions) ? { ...(persisted.providerOptions as Record<string, unknown>) } : {},
         count: stringValue("count", defaultAiConfig.count),
     };
     for (const key of ["imageProviderId", "videoProviderId", "imageProviderType", "imageRequestSchemaVersion"] as const) {

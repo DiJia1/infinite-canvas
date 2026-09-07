@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/basketikun/infinite-canvas/ai"
 	"github.com/basketikun/infinite-canvas/model"
@@ -63,10 +65,12 @@ func publicAIModelChoices(settings model.AISettings, capability ai.Capability) [
 		if !ok || !typeInfo.Supports(capability) {
 			continue
 		}
+		if (capability == ai.CapabilityImageGenerate || capability == ai.CapabilityImageEdit) && len(provider.ImagePrices) == 0 {
+			continue
+		}
 		choice := AIModelChoice{ID: provider.ID, Name: provider.Name, Type: typeInfo.ID}
 		if capability == ai.CapabilityImageGenerate && typeInfo.ImageRequestSchema != nil {
-			schema := *typeInfo.ImageRequestSchema
-			schema.Fields = append([]ai.ImageRequestField(nil), typeInfo.ImageRequestSchema.Fields...)
+			schema := configuredImageRequestSchema(provider, *typeInfo.ImageRequestSchema)
 			choice.ImageRequestSchema = &schema
 		}
 		choices = append(choices, choice)
@@ -83,8 +87,7 @@ func activeImageProviderSchema(settings model.AISettings) (string, *ai.ImageRequ
 	if !ok || !typeInfo.Supports(ai.CapabilityImageGenerate) || typeInfo.ImageRequestSchema == nil {
 		return "", nil
 	}
-	schema := *typeInfo.ImageRequestSchema
-	schema.Fields = append([]ai.ImageRequestField(nil), typeInfo.ImageRequestSchema.Fields...)
+	schema := configuredImageRequestSchema(provider, *typeInfo.ImageRequestSchema)
 	return typeInfo.ID, &schema
 }
 
@@ -116,6 +119,7 @@ func normalizeSettings(settings model.Settings) model.Settings {
 		if len(provider.Config) == 0 {
 			provider.Config = json.RawMessage("{}")
 		}
+		normalizeProviderImagePrices(provider)
 	}
 	return settings
 }
@@ -137,7 +141,7 @@ func validateSettings(settings model.AISettings) error {
 		if !json.Valid(provider.Config) {
 			return errors.New("供应商参数不是有效 JSON")
 		}
-		if err := validateImageCallAmount(provider.ImageCallAmount); err != nil {
+		if err := validateProviderImagePrices(provider); err != nil {
 			return err
 		}
 		if typeInfo.New != nil {
@@ -164,13 +168,76 @@ func validateImageCallAmount(amount decimal.Decimal) error {
 	return nil
 }
 
+func normalizeProviderImagePrices(provider *model.AIProvider) {
+	for index := range provider.ImagePrices {
+		provider.ImagePrices[index].Resolution = strings.TrimSpace(provider.ImagePrices[index].Resolution)
+	}
+}
+
+func validateProviderImagePrices(provider model.AIProvider) error {
+	seen := make(map[string]struct{}, len(provider.ImagePrices))
+	for _, price := range provider.ImagePrices {
+		resolution := strings.TrimSpace(price.Resolution)
+		if err := validateImageResolutionParameter(resolution); err != nil {
+			return err
+		}
+		key := strings.ToLower(resolution)
+		if _, exists := seen[key]; exists {
+			return errors.New("图片分辨率价格重复")
+		}
+		seen[key] = struct{}{}
+		if err := validateImageCallAmount(price.Amount); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateImageResolutionParameter(resolution string) error {
+	if resolution == "" || utf8.RuneCountInString(resolution) > 64 {
+		return errors.New("图片分辨率参数必须为 1 至 64 个字符")
+	}
+	for _, value := range resolution {
+		if unicode.IsControl(value) {
+			return errors.New("图片分辨率参数不能包含控制字符")
+		}
+	}
+	return nil
+}
+
+func configuredImageRequestSchema(provider model.AIProvider, schema ai.ImageRequestSchema) ai.ImageRequestSchema {
+	schema.Fields = append([]ai.ImageRequestField(nil), schema.Fields...)
+	for index := range schema.Fields {
+		field := &schema.Fields[index]
+		if field.Key != "resolution" {
+			continue
+		}
+		field.Type = ai.ImageRequestFieldSelect
+		field.Required = true
+		field.Options = make([]ai.ImageRequestFieldOption, 0, len(provider.ImagePrices))
+		for _, price := range provider.ImagePrices {
+			resolution := strings.TrimSpace(price.Resolution)
+			field.Options = append(field.Options, ai.ImageRequestFieldOption{Value: resolution, Label: resolution, Price: price.Amount.String()})
+		}
+		if len(field.Options) > 0 {
+			field.Default, _ = json.Marshal(field.Options[0].Value)
+		} else {
+			field.Default = nil
+		}
+	}
+	return schema
+}
+
 func providerAvailable(settings model.AISettings, id string, capability ai.Capability) bool {
 	provider, ok := findProvider(settings, id)
 	if !ok || !provider.Enabled {
 		return false
 	}
 	typeInfo, ok := ai.Type(provider.Type)
-	return ok && typeInfo.Supports(capability)
+	if !ok || !typeInfo.Supports(capability) {
+		return false
+	}
+	return (capability != ai.CapabilityImageGenerate && capability != ai.CapabilityImageEdit) || len(provider.ImagePrices) > 0
 }
 
 func resolveProviderForID(capability ai.Capability, requestedProviderID string) (ai.Provider, error) {

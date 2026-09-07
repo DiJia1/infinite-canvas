@@ -6,6 +6,7 @@ import (
 
 	"github.com/basketikun/infinite-canvas/ai"
 	"github.com/basketikun/infinite-canvas/model"
+	"github.com/shopspring/decimal"
 )
 
 func TestNormalizeImageTaskRequestDefaultsAndValidatesImageAndMaskCounts(t *testing.T) {
@@ -96,5 +97,19 @@ func TestConfiguredImageTaskProviderUsesAnEnabledRequestedModel(t *testing.T) {
 	}
 	if _, err := configuredImageTaskProvider(settings, ImageTaskModeGeneration, "disabled"); err == nil {
 		t.Fatal("configuredImageTaskProvider() accepted a disabled model")
+	}
+}
+
+func TestImageTaskAmountUsesConfiguredResolutionPrice(t *testing.T) {
+	provider := model.AIProvider{ImagePrices: []model.ImageResolutionPrice{
+		{Resolution: "1k", Amount: decimal.RequireFromString("0.1200")},
+		{Resolution: "2k", Amount: decimal.RequireFromString("0.2400")},
+	}}
+	amount, err := imageTaskAmount(provider, "2k")
+	if err != nil || !amount.Equal(decimal.RequireFromString("0.2400")) {
+		t.Fatalf("imageTaskAmount() = %s, %v", amount, err)
+	}
+	if _, err := imageTaskAmount(provider, "4k"); err == nil {
+		t.Fatal("imageTaskAmount() accepted an unpriced resolution")
 	}
 }

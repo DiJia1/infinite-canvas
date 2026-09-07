@@ -5,7 +5,6 @@ import { persist } from "zustand/middleware";
 
 import { apiGet } from "@/services/api/request";
 import { defaultAiConfig, normalizePersistedAiConfig, type AiConfig } from "@/lib/ai-config";
-import { normalizeImageResolution } from "@/lib/image-generation-config";
 import { normalizeImageRequestOptions, type ImageRequestSchema } from "@/lib/image-request-schema";
 import { resolveSelectedModel, type AIModelChoice } from "@/lib/model-selection";
 
@@ -13,15 +12,15 @@ export type { AiConfig } from "@/lib/ai-config";
 export { normalizePersistedAiConfig } from "@/lib/ai-config";
 
 export type AIStatus = {
-	imageAvailable: boolean;
-	imageEditable: boolean;
-	videoAvailable: boolean;
-	imageProviderType?: string;
-	imageRequestSchema?: ImageRequestSchema;
-	imageModels?: AIModelChoice[];
-	videoModels?: AIModelChoice[];
-	defaultImageModelId?: string;
-	defaultVideoModelId?: string;
+    imageAvailable: boolean;
+    imageEditable: boolean;
+    videoAvailable: boolean;
+    imageProviderType?: string;
+    imageRequestSchema?: ImageRequestSchema;
+    imageModels?: AIModelChoice[];
+    videoModels?: AIModelChoice[];
+    defaultImageModelId?: string;
+    defaultVideoModelId?: string;
 };
 export type AICapability = "image" | "imageEdit" | "video";
 
@@ -35,9 +34,9 @@ type ConfigStore = {
     isStatusLoading: boolean;
     isConfigOpen: boolean;
     shouldPromptContinue: boolean;
-	updateConfig: <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
-	selectImageModel: (providerId: string) => void;
-	selectVideoModel: (providerId: string) => void;
+    updateConfig: <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
+    selectImageModel: (providerId: string) => void;
+    selectVideoModel: (providerId: string) => void;
     loadPublicSettings: () => Promise<void>;
     isAiConfigReady: (capability: AICapability) => boolean;
     openConfigDialog: (shouldPromptContinue?: boolean) => void;
@@ -53,9 +52,9 @@ export const useConfigStore = create<ConfigStore>()(
             isStatusLoading: false,
             isConfigOpen: false,
             shouldPromptContinue: false,
-            updateConfig: (key, value) => set((state) => ({ config: { ...state.config, [key]: key === "resolution" ? normalizeImageResolution(value as string) : value } })),
-			selectImageModel: (providerId) => set((state) => ({ config: reconcileProviderConfig({ ...state.config, imageProviderId: providerId }, state.status || emptyAIStatus) })),
-			selectVideoModel: (providerId) => set((state) => ({ config: reconcileProviderConfig({ ...state.config, videoProviderId: providerId }, state.status || emptyAIStatus) })),
+            updateConfig: (key, value) => set((state) => ({ config: { ...state.config, [key]: value } })),
+            selectImageModel: (providerId) => set((state) => ({ config: reconcileProviderConfig({ ...state.config, imageProviderId: providerId }, state.status || emptyAIStatus) })),
+            selectVideoModel: (providerId) => set((state) => ({ config: reconcileProviderConfig({ ...state.config, videoProviderId: providerId }, state.status || emptyAIStatus) })),
             loadPublicSettings: async () => {
                 if (get().isStatusLoading) return;
                 set({ isStatusLoading: true });
@@ -96,18 +95,18 @@ export function isCapabilityReady(status: AIStatus | null | undefined, capabilit
 }
 
 export function reconcileProviderConfig(config: AiConfig, status: AIStatus): AiConfig {
-	const imageModel = resolveSelectedModel(status.imageModels, config.imageProviderId, status.defaultImageModelId);
-	const videoModel = resolveSelectedModel(status.videoModels, config.videoProviderId, status.defaultVideoModelId);
-	const schema = imageModel?.imageRequestSchema || status.imageRequestSchema;
-	const providerType = imageModel?.type || status.imageProviderType;
-	const baseConfig = { ...config, imageProviderId: imageModel?.id || config.imageProviderId, videoProviderId: videoModel?.id || config.videoProviderId };
-	if (!schema || !providerType) return baseConfig;
-	const legacyOptions = { quality: config.quality, size: config.size, resolution: config.resolution, outputFormat: config.outputFormat, background: config.background };
+    const imageModel = resolveSelectedModel(status.imageModels, config.imageProviderId, status.defaultImageModelId);
+    const videoModel = resolveSelectedModel(status.videoModels, config.videoProviderId, status.defaultVideoModelId);
+    const schema = imageModel?.imageRequestSchema || status.imageRequestSchema;
+    const providerType = imageModel?.type || status.imageProviderType;
+    const baseConfig = { ...config, imageProviderId: imageModel?.id || config.imageProviderId, videoProviderId: videoModel?.id || config.videoProviderId };
+    if (!schema || !providerType) return baseConfig;
+    const legacyOptions = { quality: config.quality, size: config.size, resolution: config.resolution, outputFormat: config.outputFormat, background: config.background };
     const options = normalizeImageRequestOptions(schema, config.imageProviderType === providerType ? { ...legacyOptions, ...config.providerOptions } : legacyOptions);
     return {
-		...baseConfig,
-		imageProviderId: imageModel?.id,
-		videoProviderId: videoModel?.id,
+        ...baseConfig,
+        imageProviderId: imageModel?.id,
+        videoProviderId: videoModel?.id,
         imageProviderType: providerType,
         imageRequestSchemaVersion: schema.version,
         providerOptions: options,

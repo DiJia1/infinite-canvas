@@ -13,12 +13,18 @@ const (
 )
 
 type AIProvider struct {
-	ID              string          `json:"id"`
-	Name            string          `json:"name"`
-	Type            string          `json:"type"`
-	Enabled         bool            `json:"enabled"`
-	ImageCallAmount decimal.Decimal `json:"imageCallAmount"`
-	Config          json.RawMessage `json:"config"`
+	ID              string                 `json:"id"`
+	Name            string                 `json:"name"`
+	Type            string                 `json:"type"`
+	Enabled         bool                   `json:"enabled"`
+	ImagePrices     []ImageResolutionPrice `json:"imagePrices"`
+	ImageCallAmount decimal.Decimal        `json:"imageCallAmount"`
+	Config          json.RawMessage        `json:"config"`
+}
+
+type ImageResolutionPrice struct {
+	Resolution string          `json:"resolution"`
+	Amount     decimal.Decimal `json:"amount"`
 }
 
 type AISettings struct {

@@ -115,8 +115,8 @@ func validatePublicFolderID(folderID string) (string, error) {
 	return folderID, nil
 }
 
-func canAccessPublicMedia(user PortalUser, _ model.Media) bool {
-	return strings.TrimSpace(user.UID) != ""
+func canAccessPublicMedia(user PortalUser, item model.Media) bool {
+	return strings.TrimSpace(user.UID) != "" && item.CleanupStatus != model.MediaCleanupDeleting
 }
 
 func SavePublicImage(ctx context.Context, user PortalUser, filename, contentType string, data []byte, title, folderID string) (model.PublicImage, MediaAccess, error) {

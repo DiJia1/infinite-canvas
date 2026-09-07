@@ -77,6 +77,9 @@ func publicImageObjectKey(extension string, now time.Time) string {
 }
 
 func canAccessMedia(ctx context.Context, user PortalUser, item model.Media) (bool, error) {
+	if item.CleanupStatus == model.MediaCleanupDeleting {
+		return false, nil
+	}
 	if user.UID == item.OwnerUID {
 		return true, nil
 	}

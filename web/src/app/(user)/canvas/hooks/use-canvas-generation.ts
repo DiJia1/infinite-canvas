@@ -8,9 +8,19 @@ import type { ReferenceImage } from "@/types/image";
 import type { ImageGenerationTask } from "@/services/api/image";
 import { imageMetadata, type StoredCanvasImage } from "@/services/canvas-image-hydration";
 import type { UploadedFile } from "@/services/file-storage";
-import { normalizeImageResolution } from "@/lib/image-generation-config";
 import { imageEditReferenceError } from "@/lib/image-edit-validation";
-import { buildAngleLabel, buildAnglePrompt, buildGenerationConfig, buildImageGenerationMetadata, findRetrySourceNode, getGenerationCount, referenceUrl, sourceNodeReferenceImages, withoutLegacyModel, type CanvasAngleParameters } from "../utils/canvas-generation-utils";
+import {
+    buildAngleLabel,
+    buildAnglePrompt,
+    buildGenerationConfig,
+    buildImageGenerationMetadata,
+    findRetrySourceNode,
+    getGenerationCount,
+    referenceUrl,
+    sourceNodeReferenceImages,
+    withoutLegacyModel,
+    type CanvasAngleParameters,
+} from "../utils/canvas-generation-utils";
 import { fitNodeSize, nodeSizeFromRatio } from "../utils/canvas-node-size";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "../constants";
 import type { CanvasMaskResources } from "../image-mask/mask-resources";
@@ -323,15 +333,17 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
                         imageBatchExpanded: count > 1 ? true : undefined,
                     },
                 };
-                const childNodes = childIds.map((id, index): CanvasNodeData => ({
-                    id,
-                    type: CanvasNodeType.Image,
-                    title: effectivePrompt.slice(0, 32) || "Generated Image",
-                    position: { x: rootNode.position.x + rootNode.width + 120 + (index % 2) * (imageConfig.width + 36), y: rootNode.position.y + Math.floor(index / 2) * (imageConfig.height + 36) },
-                    width: imageConfig.width,
-                    height: imageConfig.height,
-                    metadata: { prompt: effectivePrompt, status: NODE_STATUS_LOADING, batchRootId: count > 1 ? rootId : undefined, ...generationMetadata },
-                }));
+                const childNodes = childIds.map(
+                    (id, index): CanvasNodeData => ({
+                        id,
+                        type: CanvasNodeType.Image,
+                        title: effectivePrompt.slice(0, 32) || "Generated Image",
+                        position: { x: rootNode.position.x + rootNode.width + 120 + (index % 2) * (imageConfig.width + 36), y: rootNode.position.y + Math.floor(index / 2) * (imageConfig.height + 36) },
+                        width: imageConfig.width,
+                        height: imageConfig.height,
+                        metadata: { prompt: effectivePrompt, status: NODE_STATUS_LOADING, batchRootId: count > 1 ? rootId : undefined, ...generationMetadata },
+                    }),
+                );
                 const batchConnections = [...(isEmptyImageNode ? [] : [createConnection(nodeId, rootId)]), ...childIds.map((childId) => createConnection(rootId, childId))];
                 options.setNodes((prev) => [
                     ...prev.map((node) =>
@@ -451,10 +463,10 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
     };
 
     const retryNode = async (node: CanvasNodeData) => {
-		if (node.type === CanvasNodeType.Text) {
-			options.message.warning("文本节点不支持重新生成");
-			return;
-		}
+        if (node.type === CanvasNodeType.Text) {
+            options.message.warning("文本节点不支持重新生成");
+            return;
+        }
         const sourceNode = findRetrySourceNode(node.id, options.nodesRef.current, options.connectionsRef.current) || node;
         const batchRoot = node.metadata?.batchRootId ? options.nodesRef.current.find((item) => item.id === node.metadata?.batchRootId) : null;
         const savedImageMetadata = node.type === CanvasNodeType.Image ? { ...withoutLegacyModel(batchRoot?.metadata), ...withoutLegacyModel(node.metadata) } : undefined;
@@ -476,7 +488,13 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
             return;
         }
         const retryReferenceImages =
-            hasSavedImageMetadata && savedImageMetadata ? await resolveMetadataReferences(savedImageMetadata) : useReferenceImages ? (context?.referenceImages.length ? context.referenceImages : sourceNodeReferenceImages(batchRoot || sourceNode, options.maskResources)) : [];
+            hasSavedImageMetadata && savedImageMetadata
+                ? await resolveMetadataReferences(savedImageMetadata)
+                : useReferenceImages
+                  ? context?.referenceImages.length
+                      ? context.referenceImages
+                      : sourceNodeReferenceImages(batchRoot || sourceNode, options.maskResources)
+                  : [];
         if (useReferenceImages && !retryReferenceImages) {
             missingReference(node.id);
             return;
@@ -507,13 +525,13 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
                       generationType: savedImageMetadata.generationType,
                       size: generationConfig.size,
                       resolution: generationConfig.resolution,
-					  outputFormat: generationConfig.outputFormat,
-					  background: generationConfig.background,
-					  imageProviderId: generationConfig.imageProviderId,
-					  videoProviderId: generationConfig.videoProviderId,
-					  imageProviderType: generationConfig.imageProviderType,
-					  imageRequestSchemaVersion: generationConfig.imageRequestSchemaVersion,
-					  providerOptions: generationConfig.providerOptions,
+                      outputFormat: generationConfig.outputFormat,
+                      background: generationConfig.background,
+                      imageProviderId: generationConfig.imageProviderId,
+                      videoProviderId: generationConfig.videoProviderId,
+                      imageProviderType: generationConfig.imageProviderType,
+                      imageRequestSchemaVersion: generationConfig.imageRequestSchemaVersion,
+                      providerOptions: generationConfig.providerOptions,
                       quality: generationConfig.quality,
                       count: savedImageMetadata.count || 1,
                       references: savedImageMetadata.references,
@@ -547,7 +565,7 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
             {
                 prompt: "",
                 size: options.effectiveConfig.size,
-                resolution: normalizeImageResolution(options.effectiveConfig.resolution),
+                resolution: options.effectiveConfig.resolution,
                 count: Number(options.effectiveConfig.count) || 1,
             },
         );

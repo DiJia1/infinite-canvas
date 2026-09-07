@@ -25,8 +25,17 @@ type ImageStatistics struct {
 }
 
 type ImageModelStatistics struct {
-	ProviderID         string          `json:"providerId"`
-	ProviderName       string          `json:"providerName"`
+	ProviderID         string                      `json:"providerId"`
+	ProviderName       string                      `json:"providerName"`
+	SuccessfulCalls    int                         `json:"successfulCalls"`
+	ImageCount         int                         `json:"imageCount"`
+	Amount             decimal.Decimal             `json:"amount"`
+	UnpricedImageCount int                         `json:"unpricedImageCount"`
+	Resolutions        []ImageResolutionStatistics `json:"resolutions"`
+}
+
+type ImageResolutionStatistics struct {
+	Resolution         string          `json:"resolution"`
 	SuccessfulCalls    int             `json:"successfulCalls"`
 	ImageCount         int             `json:"imageCount"`
 	Amount             decimal.Decimal `json:"amount"`
@@ -118,8 +127,10 @@ func aggregateImageTaskStatistics(tasks []model.ImageGenerationTask, displayName
 		Users:  make([]ImageUserStatistics, 0),
 	}
 	byModel := make(map[string]*ImageModelStatistics)
+	modelResolutions := make(map[string]map[string]*ImageResolutionStatistics)
 	byUser := make(map[string]*ImageUserStatistics)
 	userModels := make(map[string]map[string]*ImageModelStatistics)
+	userModelResolutions := make(map[string]map[string]map[string]*ImageResolutionStatistics)
 	for _, task := range tasks {
 		imageCount := imageTaskResultCount(task.ResultMediaIDsJSON)
 		providerID := strings.TrimSpace(task.ProviderID)
@@ -129,6 +140,7 @@ func aggregateImageTaskStatistics(tasks []model.ImageGenerationTask, displayName
 		}
 		modelKey := providerID + "\x00" + providerName
 		modelGroup := statisticsModelGroup(byModel, modelKey, providerID, providerName)
+		modelResolutionGroup := statisticsResolutionGroup(modelResolutions, modelKey, task.Resolution)
 
 		userUID := strings.TrimSpace(task.OwnerUID)
 		userGroup := byUser[userUID]
@@ -140,10 +152,16 @@ func aggregateImageTaskStatistics(tasks []model.ImageGenerationTask, displayName
 			userGroup = &ImageUserStatistics{UserUID: userUID, DisplayName: displayName, Amount: decimal.Zero, Models: make([]ImageModelStatistics, 0)}
 			byUser[userUID] = userGroup
 			userModels[userUID] = make(map[string]*ImageModelStatistics)
+			userModelResolutions[userUID] = make(map[string]map[string]*ImageResolutionStatistics)
 		}
 		userModelGroup := statisticsModelGroup(userModels[userUID], modelKey, providerID, providerName)
+		userResolutionGroup := statisticsResolutionGroup(userModelResolutions[userUID], modelKey, task.Resolution)
 
 		for _, group := range []*ImageModelStatistics{modelGroup, userModelGroup} {
+			group.SuccessfulCalls++
+			group.ImageCount += imageCount
+		}
+		for _, group := range []*ImageResolutionStatistics{modelResolutionGroup, userResolutionGroup} {
 			group.SuccessfulCalls++
 			group.ImageCount += imageCount
 		}
@@ -154,22 +172,30 @@ func aggregateImageTaskStatistics(tasks []model.ImageGenerationTask, displayName
 			for _, group := range []*ImageModelStatistics{modelGroup, userModelGroup} {
 				group.Amount = group.Amount.Add(task.Amount)
 			}
+			for _, group := range []*ImageResolutionStatistics{modelResolutionGroup, userResolutionGroup} {
+				group.Amount = group.Amount.Add(task.Amount)
+			}
 			userGroup.Amount = userGroup.Amount.Add(task.Amount)
 			result.Amount = result.Amount.Add(task.Amount)
 		} else {
 			for _, group := range []*ImageModelStatistics{modelGroup, userModelGroup} {
 				group.UnpricedImageCount += imageCount
 			}
+			for _, group := range []*ImageResolutionStatistics{modelResolutionGroup, userResolutionGroup} {
+				group.UnpricedImageCount += imageCount
+			}
 			userGroup.UnpricedImageCount += imageCount
 			result.UnpricedImageCount += imageCount
 		}
 	}
-	for _, group := range byModel {
+	for modelKey, group := range byModel {
+		group.Resolutions = resolutionStatistics(modelResolutions[modelKey])
 		result.Models = append(result.Models, *group)
 	}
 	sortImageModelStatistics(result.Models)
 	for userUID, group := range byUser {
-		for _, modelGroup := range userModels[userUID] {
+		for modelKey, modelGroup := range userModels[userUID] {
+			modelGroup.Resolutions = resolutionStatistics(userModelResolutions[userUID][modelKey])
 			group.Models = append(group.Models, *modelGroup)
 		}
 		sortImageModelStatistics(group.Models)
@@ -187,10 +213,40 @@ func aggregateImageTaskStatistics(tasks []model.ImageGenerationTask, displayName
 func statisticsModelGroup(groups map[string]*ImageModelStatistics, key, providerID, providerName string) *ImageModelStatistics {
 	group := groups[key]
 	if group == nil {
-		group = &ImageModelStatistics{ProviderID: providerID, ProviderName: providerName, Amount: decimal.Zero}
+		group = &ImageModelStatistics{ProviderID: providerID, ProviderName: providerName, Amount: decimal.Zero, Resolutions: make([]ImageResolutionStatistics, 0)}
 		groups[key] = group
 	}
 	return group
+}
+
+func statisticsResolutionGroup(groups map[string]map[string]*ImageResolutionStatistics, modelKey, resolution string) *ImageResolutionStatistics {
+	resolution = strings.TrimSpace(resolution)
+	resolutionKey := strings.ToLower(resolution)
+	modelGroups := groups[modelKey]
+	if modelGroups == nil {
+		modelGroups = make(map[string]*ImageResolutionStatistics)
+		groups[modelKey] = modelGroups
+	}
+	group := modelGroups[resolutionKey]
+	if group == nil {
+		group = &ImageResolutionStatistics{Resolution: resolution, Amount: decimal.Zero}
+		modelGroups[resolutionKey] = group
+	}
+	return group
+}
+
+func resolutionStatistics(groups map[string]*ImageResolutionStatistics) []ImageResolutionStatistics {
+	items := make([]ImageResolutionStatistics, 0, len(groups))
+	for _, group := range groups {
+		items = append(items, *group)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Amount.Equal(items[j].Amount) {
+			return strings.ToLower(items[i].Resolution) < strings.ToLower(items[j].Resolution)
+		}
+		return items[i].Amount.GreaterThan(items[j].Amount)
+	})
+	return items
 }
 
 func sortImageModelStatistics(items []ImageModelStatistics) {

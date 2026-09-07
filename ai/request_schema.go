@@ -22,6 +22,7 @@ type ImageRequestOptions map[string]json.RawMessage
 type ImageRequestFieldOption struct {
 	Value string `json:"value"`
 	Label string `json:"label"`
+	Price string `json:"price,omitempty"`
 }
 
 type ImageRequestField struct {

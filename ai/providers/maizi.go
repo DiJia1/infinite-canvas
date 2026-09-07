@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/textproto"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/basketikun/infinite-canvas/ai"
@@ -73,7 +72,7 @@ var maiziImageRequestSchema = ai.ImageRequestSchema{
 	Fields: []ai.ImageRequestField{
 		{Key: "quality", Label: "质量", Type: ai.ImageRequestFieldSelect, Default: json.RawMessage(`"auto"`), Options: []ai.ImageRequestFieldOption{{Value: "auto", Label: "自动"}, {Value: "high", Label: "高"}, {Value: "medium", Label: "中"}, {Value: "low", Label: "低"}}},
 		{Key: "size", Label: "宽高比", Type: ai.ImageRequestFieldSelect, Default: json.RawMessage(`"1:1"`), Options: []ai.ImageRequestFieldOption{{Value: "1:1", Label: "1:1"}, {Value: "3:2", Label: "3:2"}, {Value: "2:3", Label: "2:3"}, {Value: "4:3", Label: "4:3"}, {Value: "3:4", Label: "3:4"}, {Value: "16:9", Label: "16:9"}, {Value: "9:16", Label: "9:16"}, {Value: "21:9", Label: "21:9"}, {Value: "auto", Label: "自动"}}},
-		{Key: "resolution", Label: "尺寸", Type: ai.ImageRequestFieldSelect, Default: json.RawMessage(`"1k"`), Options: []ai.ImageRequestFieldOption{{Value: "1k", Label: "1K"}, {Value: "2k", Label: "2K"}, {Value: "4k", Label: "4K"}}},
+		{Key: "resolution", Label: "尺寸", Type: ai.ImageRequestFieldText, Required: true},
 		{Key: "outputFormat", Label: "输出格式", Type: ai.ImageRequestFieldSelect, Default: json.RawMessage(`"jpeg"`), Options: []ai.ImageRequestFieldOption{{Value: "jpeg", Label: "JPEG"}, {Value: "png", Label: "PNG"}}},
 		{Key: "background", Label: "背景", Type: ai.ImageRequestFieldSelect, Default: json.RawMessage(`"auto"`), Options: []ai.ImageRequestFieldOption{{Value: "auto", Label: "自动"}, {Value: "opaque", Label: "不透明"}, {Value: "transparent", Label: "透明"}}},
 	},
@@ -395,27 +394,7 @@ func maiziImageOutput(request ai.ImageRequest) (string, string) {
 }
 
 func maiziResolution(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "1k" || value == "2k" || value == "4k" {
-		return value
-	}
-	parts := strings.Split(value, "x")
-	if len(parts) != 2 {
-		return "1k"
-	}
-	width, widthErr := strconv.Atoi(parts[0])
-	height, heightErr := strconv.Atoi(parts[1])
-	if widthErr != nil || heightErr != nil {
-		return "1k"
-	}
-	largest := max(width, height)
-	if largest <= 1792 {
-		return "1k"
-	}
-	if largest <= 2048 {
-		return "2k"
-	}
-	return "4k"
+	return strings.TrimSpace(value)
 }
 
 func firstNonEmpty(values ...string) string {

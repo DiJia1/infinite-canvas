@@ -14,4 +14,8 @@ test("statistics reports use horizontal tabs and user-first consumption cards", 
     assert.match(source, /总费用/);
     assert.match(source, /成功图片/);
     assert.match(source, /function ModelUsageTable/);
+    assert.match(source, /expandedRowRender/);
+    assert.match(source, /function ResolutionUsageTable/);
+    assert.match(source, /图片规格/);
+    assert.match(source, /未记录规格/);
 });

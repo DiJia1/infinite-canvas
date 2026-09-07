@@ -8,6 +8,8 @@ test("range statistics API preserves amounts as strings", async () => {
     const source = await readFile(sourceURL, "utf8");
 
     assert.match(source, /amount: string/);
+    assert.match(source, /export type StatisticsResolution/);
+    assert.match(source, /resolutions: StatisticsResolution\[\]/);
     assert.match(source, /startDate: string/);
     assert.match(source, /endDate: string/);
     assert.match(source, /users: StatisticsUser\[\]/);

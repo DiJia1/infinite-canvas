@@ -105,3 +105,45 @@ func TestAggregateImageTaskStatisticsGroupsUserModelsAndRetainsHistoricalMembers
 		t.Fatalf("historical member = %#v", result.Users[1])
 	}
 }
+
+func TestAggregateImageTaskStatisticsGroupsModelAndUserDetailsByResolution(t *testing.T) {
+	tasks := []model.ImageGenerationTask{
+		{ID: "two-k-a", OwnerUID: "alice", Status: model.ImageTaskSucceeded, ProviderID: "doubao", ProviderName: "豆包", Resolution: "2K", Amount: decimal.RequireFromString("0.2000"), AmountRecorded: true, ResultMediaIDsJSON: `["media-1"]`},
+		{ID: "two-k-b", OwnerUID: "alice", Status: model.ImageTaskSucceeded, ProviderID: "doubao", ProviderName: "豆包", Resolution: " 2k ", Amount: decimal.RequireFromString("0.3000"), AmountRecorded: true, ResultMediaIDsJSON: `["media-2","media-3"]`},
+		{ID: "one-k-unpriced", OwnerUID: "bob", Status: model.ImageTaskSucceeded, ProviderID: "doubao", ProviderName: "豆包", Resolution: "1K", AmountRecorded: false, ResultMediaIDsJSON: `["media-4"]`},
+		{ID: "legacy", OwnerUID: "bob", Status: model.ImageTaskSucceeded, ProviderID: "legacy", ProviderName: "旧模型", Amount: decimal.RequireFromString("0.1000"), AmountRecorded: true, ResultMediaIDsJSON: `["media-5"]`},
+	}
+
+	result := aggregateImageTaskStatistics(tasks, map[string]string{"alice": "张三", "bob": "李四"})
+	models := make(map[string]ImageModelStatistics, len(result.Models))
+	for _, item := range result.Models {
+		models[item.ProviderID] = item
+	}
+
+	doubao := models["doubao"]
+	if doubao.SuccessfulCalls != 3 || doubao.ImageCount != 4 || !doubao.Amount.Equal(decimal.RequireFromString("0.5000")) || doubao.UnpricedImageCount != 1 {
+		t.Fatalf("doubao summary = %#v", doubao)
+	}
+	resolutionDetails := make(map[string]ImageResolutionStatistics, len(doubao.Resolutions))
+	for _, item := range doubao.Resolutions {
+		resolutionDetails[item.Resolution] = item
+	}
+	if got := resolutionDetails["2K"]; got.SuccessfulCalls != 2 || got.ImageCount != 3 || !got.Amount.Equal(decimal.RequireFromString("0.5000")) || got.UnpricedImageCount != 0 {
+		t.Fatalf("2K resolution = %#v", got)
+	}
+	if got := resolutionDetails["1K"]; got.SuccessfulCalls != 1 || got.ImageCount != 1 || !got.Amount.IsZero() || got.UnpricedImageCount != 1 {
+		t.Fatalf("1K resolution = %#v", got)
+	}
+	legacy := models["legacy"]
+	if len(legacy.Resolutions) != 1 || legacy.Resolutions[0].Resolution != "" || legacy.Resolutions[0].SuccessfulCalls != 1 || legacy.Resolutions[0].ImageCount != 1 || !legacy.Resolutions[0].Amount.Equal(decimal.RequireFromString("0.1000")) {
+		t.Fatalf("legacy resolution = %#v", legacy.Resolutions)
+	}
+
+	users := make(map[string]ImageUserStatistics, len(result.Users))
+	for _, item := range result.Users {
+		users[item.UserUID] = item
+	}
+	if len(users["alice"].Models) != 1 || len(users["alice"].Models[0].Resolutions) != 1 || users["alice"].Models[0].Resolutions[0].Resolution != "2K" || !users["alice"].Models[0].Resolutions[0].Amount.Equal(decimal.RequireFromString("0.5000")) {
+		t.Fatalf("alice resolution details = %#v", users["alice"].Models)
+	}
+}

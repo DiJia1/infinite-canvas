@@ -36,17 +36,10 @@ var doubaoSeedreamImageRequestSchema = ai.ImageRequestSchema{
 	MaxReferenceImages: 10,
 	SupportsMask:       false,
 	Fields: []ai.ImageRequestField{
-		{Key: "size", Label: "宽高比", Type: ai.ImageRequestFieldSelect, Default: json.RawMessage(`"1:1"`), Options: []ai.ImageRequestFieldOption{{Value: "1:1", Label: "1:1"}, {Value: "3:2", Label: "3:2"}, {Value: "2:3", Label: "2:3"}, {Value: "4:3", Label: "4:3"}, {Value: "3:4", Label: "3:4"}, {Value: "16:9", Label: "16:9"}, {Value: "9:16", Label: "9:16"}, {Value: "21:9", Label: "21:9"}, {Value: "auto", Label: "自动"}}},
-		{Key: "resolution", Label: "尺寸", Type: ai.ImageRequestFieldSelect, Default: json.RawMessage(`"1k"`), Options: []ai.ImageRequestFieldOption{{Value: "1k", Label: "1K"}, {Value: "1.5k", Label: "1.5K"}, {Value: "2k", Label: "2K"}}},
+		{Key: "resolution", Label: "尺寸", Type: ai.ImageRequestFieldText, Required: true},
 		{Key: "outputFormat", Label: "输出格式", Type: ai.ImageRequestFieldSelect, Default: json.RawMessage(`"jpeg"`), Options: []ai.ImageRequestFieldOption{{Value: "jpeg", Label: "JPEG"}, {Value: "png", Label: "PNG"}}},
 		{Key: "background", Label: "背景", Type: ai.ImageRequestFieldSelect, Default: json.RawMessage(`"opaque"`), Options: []ai.ImageRequestFieldOption{{Value: "opaque", Label: "不透明"}, {Value: "transparent", Label: "透明"}}},
 	},
-}
-
-var doubaoSeedreamDimensions = map[string]map[string]string{
-	"1k":   {"1:1": "1024x1024", "4:3": "1152x864", "3:4": "864x1152", "16:9": "1424x800", "9:16": "800x1424", "3:2": "1248x832", "2:3": "832x1248", "21:9": "1568x672"},
-	"1.5k": {"1:1": "1536x1536", "4:3": "1792x1344", "3:4": "1344x1792", "16:9": "2048x1152", "9:16": "1152x2048", "3:2": "1872x1248", "2:3": "1248x1872", "21:9": "2352x1008"},
-	"2k":   {"1:1": "2048x2048", "4:3": "2368x1776", "3:4": "1776x2368", "16:9": "2816x1584", "9:16": "1584x2816", "3:2": "2496x1664", "2:3": "1664x2496", "21:9": "3136x1344"},
 }
 
 func init() {
@@ -85,7 +78,6 @@ func (provider *doubaoSeedreamProvider) NormalizeImageTaskRequest(request ai.Ima
 	}
 	options := cloneImageRequestOptions(request.Request.Options)
 	delete(options, "watermark")
-	setSeedreamLegacyOption(options, "size", request.Request.Size)
 	setSeedreamLegacyOption(options, "resolution", request.Request.Resolution)
 	setSeedreamLegacyOption(options, "outputFormat", request.Request.OutputFormat)
 	if strings.TrimSpace(request.Request.Background) != "auto" {
@@ -96,11 +88,6 @@ func (provider *doubaoSeedreamProvider) NormalizeImageTaskRequest(request ai.Ima
 		return ai.ImageTaskRequest{}, doubaoSeedreamError{message: err.Error()}
 	}
 	resolution := imageRequestOptionString(normalized, "resolution")
-	ratio := imageRequestOptionString(normalized, "size")
-	nativeSize, err := doubaoSeedreamSize(resolution, ratio)
-	if err != nil {
-		return ai.ImageTaskRequest{}, err
-	}
 	outputFormat := imageRequestOptionString(normalized, "outputFormat")
 	background := imageRequestOptionString(normalized, "background")
 	if background == "transparent" {
@@ -112,7 +99,7 @@ func (provider *doubaoSeedreamProvider) NormalizeImageTaskRequest(request ai.Ima
 		}
 	}
 	request.Request.Options = normalized
-	request.Request.Size = nativeSize
+	request.Request.Size = resolution
 	request.Request.Resolution = resolution
 	request.Request.OutputFormat = outputFormat
 	request.Request.Background = background
@@ -121,25 +108,12 @@ func (provider *doubaoSeedreamProvider) NormalizeImageTaskRequest(request ai.Ima
 }
 
 func setSeedreamLegacyOption(options ai.ImageRequestOptions, key, value string) {
-	value = strings.TrimSpace(strings.ToLower(value))
+	value = strings.TrimSpace(value)
 	if _, exists := options[key]; exists || value == "" {
-		return
-	}
-	if key == "resolution" && value == "4k" {
 		return
 	}
 	encoded, _ := json.Marshal(value)
 	options[key] = encoded
-}
-
-func doubaoSeedreamSize(resolution, ratio string) (string, error) {
-	if ratio == "auto" {
-		return map[string]string{"1k": "1K", "1.5k": "1.5K", "2k": "2K"}[resolution], nil
-	}
-	if size := doubaoSeedreamDimensions[resolution][ratio]; size != "" {
-		return size, nil
-	}
-	return "", doubaoSeedreamError{message: "Doubao Seedream 不支持当前尺寸与宽高比组合"}
 }
 
 func (provider *doubaoSeedreamProvider) CreateImageTask(ctx context.Context, request ai.ImageTaskRequest) (ai.ImageTask, error) {

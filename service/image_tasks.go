@@ -11,6 +11,7 @@ import (
 	"github.com/basketikun/infinite-canvas/ai"
 	"github.com/basketikun/infinite-canvas/model"
 	"github.com/basketikun/infinite-canvas/repository"
+	"github.com/shopspring/decimal"
 )
 
 const (
@@ -71,6 +72,10 @@ func CreateImageTask(ctx context.Context, request CreateImageTaskRequest) (Image
 	if err != nil {
 		return ImageTaskView{}, err
 	}
+	amount, err := imageTaskAmount(provider, request.Request.Resolution)
+	if err != nil {
+		return ImageTaskView{}, err
+	}
 	providerOptionsJSON, err := imageTaskOptionsJSON(request.Request.Options)
 	if err != nil {
 		return ImageTaskView{}, err
@@ -94,7 +99,7 @@ func CreateImageTask(ctx context.Context, request CreateImageTaskRequest) (Image
 		ID: taskID, OwnerUID: user.UID, ClientRequestID: request.ClientRequestID, Mode: request.Mode,
 		Status: model.ImageTaskQueued, ProviderID: provider.ID, ProviderName: provider.Name, ProviderType: provider.Type, ProviderConfig: string(provider.Config),
 		Prompt: request.Request.Prompt, Quality: strings.TrimSpace(request.Request.Quality), Size: strings.TrimSpace(request.Request.Size), Resolution: strings.TrimSpace(request.Request.Resolution), OutputFormat: request.Request.OutputFormat, Background: request.Request.Background, ProviderOptionsJSON: providerOptionsJSON, Count: 1,
-		Amount: provider.ImageCallAmount, AmountRecorded: true, ReferencesJSON: string(inputsJSON), RequestSummary: requestSummary, OperationLogID: operationLogID, CreatedAt: now(), UpdatedAt: now(),
+		Amount: amount, AmountRecorded: true, ReferencesJSON: string(inputsJSON), RequestSummary: requestSummary, OperationLogID: operationLogID, CreatedAt: now(), UpdatedAt: now(),
 	}
 	operation := model.OperationLog{
 		ID: operationLogID, ActorUID: user.UID, ActorName: PortalDisplayName(user), ActorRoles: append([]string{}, user.Roles...),
@@ -110,6 +115,16 @@ func CreateImageTask(ctx context.Context, request CreateImageTaskRequest) (Image
 		_ = DeleteImageTaskInputs(ctx, inputs)
 	}
 	return imageTaskView(ctx, user, created)
+}
+
+func imageTaskAmount(provider model.AIProvider, resolution string) (decimal.Decimal, error) {
+	resolution = strings.ToLower(strings.TrimSpace(resolution))
+	for _, price := range provider.ImagePrices {
+		if strings.ToLower(strings.TrimSpace(price.Resolution)) == resolution {
+			return price.Amount, nil
+		}
+	}
+	return decimal.Zero, safeMessageError{message: "当前模型未配置该分辨率的图片价格"}
 }
 
 func summarizeImageTaskRequest(provider model.AIProvider, request ai.ImageTaskRequest) (string, error) {

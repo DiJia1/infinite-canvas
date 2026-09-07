@@ -2,6 +2,14 @@ import type { StatisticsRange } from "@/lib/statistics-range";
 
 import { apiGet } from "./request";
 
+export type StatisticsResolution = {
+    resolution: string;
+    successfulCalls: number;
+    imageCount: number;
+    amount: string;
+    unpricedImageCount: number;
+};
+
 export type StatisticsModel = {
     providerId: string;
     providerName: string;
@@ -9,6 +17,7 @@ export type StatisticsModel = {
     imageCount: number;
     amount: string;
     unpricedImageCount: number;
+    resolutions: StatisticsResolution[];
 };
 
 export type StatisticsUser = {

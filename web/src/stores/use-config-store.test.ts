@@ -3,10 +3,10 @@ import test from "node:test";
 
 import { defaultConfig, isCapabilityReady, normalizePersistedAiConfig } from "./use-config-store.ts";
 
-test("normalizes legacy persisted AI config to current fields", () => {
+test("keeps a persisted upstream resolution unchanged while removing obsolete fields", () => {
     const normalized = normalizePersistedAiConfig({ model: "old", imageModel: "old-image", videoModel: "old-video", textModel: "old-text", models: ["old"], systemPrompt: "old prompt", size: "16:9", resolution: "1024x1024" });
 
-    assert.deepEqual(normalized, { ...defaultConfig, size: "16:9", resolution: "1k" });
+    assert.deepEqual(normalized, { ...defaultConfig, size: "16:9", resolution: "1024x1024" });
     for (const obsoleteField of ["model", "imageModel", "videoModel", "textModel", "models", "systemPrompt"]) {
         assert.equal(obsoleteField in normalized, false);
     }

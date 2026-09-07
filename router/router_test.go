@@ -568,13 +568,13 @@ func TestPromoteLegacyCanvasTemporaryMediaKeepsObjectKey(t *testing.T) {
 
 func TestImageGenerationCreatesPersistentTaskWithoutForwardingModel(t *testing.T) {
 	if _, err := service.SaveSettings(model.Settings{AI: model.AISettings{
-		Providers:       []model.AIProvider{{ID: "async-maizi", Name: "Maizi", Type: "maizi-image", Enabled: true, ImageCallAmount: decimal.RequireFromString("0.1234"), Config: json.RawMessage(`{"apiKey":"test-key","model":"gpt-image-2"}`)}},
+		Providers:       []model.AIProvider{{ID: "async-maizi", Name: "Maizi", Type: "maizi-image", Enabled: true, ImagePrices: []model.ImageResolutionPrice{{Resolution: "1k", Amount: decimal.RequireFromString("0.1234")}, {Resolution: "2k", Amount: decimal.RequireFromString("0.4567")}}, Config: json.RawMessage(`{"apiKey":"test-key","model":"gpt-image-2"}`)}},
 		ImageProviderID: "async-maizi",
 	}}); err != nil {
 		t.Fatal(err)
 	}
 	clientRequestID := "async-create-" + time.Now().Format("20060102150405.000000000")
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/images/generations", bytes.NewBufferString(`{"clientRequestId":"`+clientRequestID+`","model":"browser-controlled-model","prompt":"生成一张测试图","n":1,"size":"1:1","resolution":"1k"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/images/generations", bytes.NewBufferString(`{"clientRequestId":"`+clientRequestID+`","model":"browser-controlled-model","prompt":"生成一张测试图","n":1,"size":"1:1","resolution":"2k"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Portal-User-Uid", "async-owner")
 	response := httptest.NewRecorder()
@@ -592,8 +592,17 @@ func TestImageGenerationCreatesPersistentTaskWithoutForwardingModel(t *testing.T
 		t.Fatalf("create image task = %d/%s", response.Code, response.Body.String())
 	}
 	stored, found, err := repository.GetImageGenerationTask(created.Data.ID)
-	if err != nil || !found || stored.ProviderName != "Maizi" || !stored.AmountRecorded || !stored.Amount.Equal(decimal.RequireFromString("0.1234")) {
+	if err != nil || !found || stored.ProviderName != "Maizi" || stored.Resolution != "2k" || !stored.AmountRecorded || !stored.Amount.Equal(decimal.RequireFromString("0.4567")) {
 		t.Fatalf("image task price snapshot = %#v, found=%t, err=%v", stored, found, err)
+	}
+
+	unpriced := httptest.NewRequest(http.MethodPost, "/api/v1/images/generations", bytes.NewBufferString(`{"clientRequestId":"`+clientRequestID+`-unpriced","prompt":"不允许的分辨率","n":1,"size":"1:1","resolution":"4k"}`))
+	unpriced.Header.Set("Content-Type", "application/json")
+	unpriced.Header.Set("X-Portal-User-Uid", "async-owner")
+	unpricedResponse := httptest.NewRecorder()
+	New().ServeHTTP(unpricedResponse, unpriced)
+	if unpricedResponse.Code != http.StatusOK || !strings.Contains(unpricedResponse.Body.String(), "未配置该分辨率") {
+		t.Fatalf("unpriced resolution = %d/%s", unpricedResponse.Code, unpricedResponse.Body.String())
 	}
 
 	lookup := httptest.NewRequest(http.MethodGet, "/api/v1/images/tasks/by-client-request/"+clientRequestID, nil)
@@ -607,7 +616,7 @@ func TestImageGenerationCreatesPersistentTaskWithoutForwardingModel(t *testing.T
 
 func TestImageEditPersistsPNGMaskAndOutputSnapshot(t *testing.T) {
 	if _, err := service.SaveSettings(model.Settings{AI: model.AISettings{
-		Providers:       []model.AIProvider{{ID: "async-maizi-mask", Name: "Maizi", Type: "maizi-image", Enabled: true, Config: json.RawMessage(`{"apiKey":"test-key","model":"gpt-image-2"}`)}},
+		Providers:       []model.AIProvider{{ID: "async-maizi-mask", Name: "Maizi", Type: "maizi-image", Enabled: true, ImagePrices: []model.ImageResolutionPrice{{Resolution: "2K", Amount: decimal.Zero}}, Config: json.RawMessage(`{"apiKey":"test-key","model":"gpt-image-2"}`)}},
 		ImageProviderID: "async-maizi-mask",
 	}}); err != nil {
 		t.Fatal(err)
@@ -618,6 +627,7 @@ func TestImageEditPersistsPNGMaskAndOutputSnapshot(t *testing.T) {
 	_ = writer.WriteField("clientRequestId", clientRequestID)
 	_ = writer.WriteField("prompt", "只替换白色遮罩区域")
 	_ = writer.WriteField("n", "1")
+	_ = writer.WriteField("resolution", "2K")
 	_ = writer.WriteField("output_format", "png")
 	_ = writer.WriteField("background", "transparent")
 	for index := 0; index < 7; index++ {

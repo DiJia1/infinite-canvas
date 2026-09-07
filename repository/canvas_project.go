@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"sort"
 
 	"github.com/basketikun/infinite-canvas/model"
 	"gorm.io/gorm"
@@ -17,21 +18,30 @@ func CreateCanvasProject(item model.CanvasProject) (model.CanvasProject, bool, e
 	if err != nil {
 		return model.CanvasProject{}, false, err
 	}
-	result := database.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "id"}, {Name: "owner_uid"}}, DoNothing: true}).Create(&item)
-	if result.Error != nil {
-		return model.CanvasProject{}, false, result.Error
-	}
-	if result.RowsAffected > 0 {
-		return item, true, nil
-	}
-	existing, found, err := GetCanvasProject(item.OwnerUID, item.ID)
+	created := item
+	inserted := false
+	err = database.Transaction(func(tx *gorm.DB) error {
+		result := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "id"}, {Name: "owner_uid"}}, DoNothing: true}).Create(&item)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return tx.Where("id = ? AND owner_uid = ?", item.ID, item.OwnerUID).First(&created).Error
+		}
+		change, err := newCanvasMediaChange(item.OwnerUID, nil, item.Document)
+		if err != nil {
+			return err
+		}
+		if err := applyCanvasMediaChanges(tx, []canvasMediaChange{change}); err != nil {
+			return err
+		}
+		created, inserted = item, true
+		return nil
+	})
 	if err != nil {
 		return model.CanvasProject{}, false, err
 	}
-	if !found {
-		return model.CanvasProject{}, false, errors.New("canvas project was not found after insert conflict")
-	}
-	return existing, false, nil
+	return created, inserted, nil
 }
 
 // ImportCanvasProjects inserts a complete legacy batch atomically. Existing
@@ -42,27 +52,41 @@ func ImportCanvasProjects(items []model.CanvasProject) ([]model.CanvasProject, e
 	if err != nil {
 		return nil, err
 	}
-	resultItems := make([]model.CanvasProject, 0, len(items))
-	err = database.Transaction(func(transaction *gorm.DB) error {
-		for _, item := range items {
-			result := transaction.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "id"}, {Name: "owner_uid"}}, DoNothing: true}).Create(&item)
+	resultItems := make([]model.CanvasProject, len(items))
+	// Preserve response order while obtaining project locks in a stable order.
+	order := make([]int, len(items))
+	for index := range items {
+		order[index] = index
+	}
+	sort.Slice(order, func(i, j int) bool {
+		a, b := items[order[i]], items[order[j]]
+		if a.ID == b.ID {
+			return a.OwnerUID < b.OwnerUID
+		}
+		return a.ID < b.ID
+	})
+	err = database.Transaction(func(tx *gorm.DB) error {
+		changes := make([]canvasMediaChange, 0, len(items))
+		for _, index := range order {
+			item := items[index]
+			result := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "id"}, {Name: "owner_uid"}}, DoNothing: true}).Create(&item)
 			if result.Error != nil {
 				return result.Error
 			}
-			if result.RowsAffected > 0 {
-				resultItems = append(resultItems, item)
+			if result.RowsAffected == 0 {
+				if err := tx.Where("id = ? AND owner_uid = ?", item.ID, item.OwnerUID).First(&resultItems[index]).Error; err != nil {
+					return err
+				}
 				continue
 			}
-			existing := model.CanvasProject{}
-			if err := transaction.Where("id = ? AND owner_uid = ?", item.ID, item.OwnerUID).First(&existing).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return errors.New("canvas project was not found after import conflict")
-				}
+			resultItems[index] = item
+			change, err := newCanvasMediaChange(item.OwnerUID, nil, item.Document)
+			if err != nil {
 				return err
 			}
-			resultItems = append(resultItems, existing)
+			changes = append(changes, change)
 		}
-		return nil
+		return applyCanvasMediaChanges(tx, changes)
 	})
 	if err != nil {
 		return nil, err
@@ -98,33 +122,37 @@ func UpdateCanvasProject(ownerUID, id string, revision int, title string, docume
 	if err != nil {
 		return model.CanvasProject{}, false, err
 	}
-	existing := model.CanvasProject{}
-	if err := database.Select("created_at").Where("id = ? AND owner_uid = ?", id, ownerUID).First(&existing).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return model.CanvasProject{}, false, nil
+	var item model.CanvasProject
+	accepted := false
+	err = database.Transaction(func(tx *gorm.DB) error {
+		var existing model.CanvasProject
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND owner_uid = ?", id, ownerUID).First(&existing).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
 		}
+		if existing.Revision != revision {
+			return nil
+		}
+		change, err := newCanvasMediaChange(ownerUID, existing.Document, document)
+		if err != nil {
+			return err
+		}
+		if err := tx.Model(&model.CanvasProject{}).Where("id = ? AND owner_uid = ?", id, ownerUID).Updates(map[string]any{"title": title, "document": document, "revision": revision + 1, "updated_at": updatedAt}).Error; err != nil {
+			return err
+		}
+		if err := applyCanvasMediaChanges(tx, []canvasMediaChange{change}); err != nil {
+			return err
+		}
+		item = model.CanvasProject{ID: id, OwnerUID: ownerUID, Title: title, Document: model.CanvasProjectDocument(append([]byte(nil), document...)), Revision: revision + 1, CreatedAt: existing.CreatedAt, UpdatedAt: updatedAt}
+		accepted = true
+		return nil
+	})
+	if err != nil {
 		return model.CanvasProject{}, false, err
 	}
-	result := database.Model(&model.CanvasProject{}).
-		Where("id = ? AND owner_uid = ? AND revision = ?", id, ownerUID, revision).
-		Updates(map[string]any{
-			"title":      title,
-			"document":   document,
-			"revision":   gorm.Expr("revision + ?", 1),
-			"updated_at": updatedAt,
-		})
-	if result.Error != nil || result.RowsAffected == 0 {
-		return model.CanvasProject{}, false, result.Error
-	}
-	return model.CanvasProject{
-		ID:        id,
-		OwnerUID:  ownerUID,
-		Title:     title,
-		Document:  model.CanvasProjectDocument(append([]byte(nil), document...)),
-		Revision:  revision + 1,
-		CreatedAt: existing.CreatedAt,
-		UpdatedAt: updatedAt,
-	}, true, nil
+	return item, accepted, nil
 }
 
 // UpdateCanvasProjectIdempotently atomically claims a request ID before the
@@ -175,10 +203,17 @@ func UpdateCanvasProjectIdempotently(ownerUID, id string, revision int, title st
 		}
 
 		existing := model.CanvasProject{}
-		if err := transaction.Select("created_at").Where("id = ? AND owner_uid = ?", id, ownerUID).First(&existing).Error; err != nil {
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND owner_uid = ?", id, ownerUID).First(&existing).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return errCanvasProjectRevisionConflict
 			}
+			return err
+		}
+		if existing.Revision != revision {
+			return errCanvasProjectRevisionConflict
+		}
+		change, err := newCanvasMediaChange(ownerUID, existing.Document, document)
+		if err != nil {
 			return err
 		}
 		result := transaction.Model(&model.CanvasProject{}).
@@ -194,6 +229,9 @@ func UpdateCanvasProjectIdempotently(ownerUID, id string, revision int, title st
 		}
 		if result.RowsAffected == 0 {
 			return errCanvasProjectRevisionConflict
+		}
+		if err := applyCanvasMediaChanges(transaction, []canvasMediaChange{change}); err != nil {
+			return err
 		}
 		if err := transaction.Model(&model.CanvasSaveRequest{}).Where("request_id = ?", requestID).Updates(map[string]any{
 			"result_revision":   revision + 1,
@@ -217,7 +255,10 @@ func UpdateCanvasProjectIdempotently(ownerUID, id string, revision int, title st
 	if errors.Is(err, errCanvasProjectRevisionConflict) {
 		return model.CanvasProject{}, false, false, nil
 	}
-	return item, accepted, deduplicated, err
+	if err != nil {
+		return model.CanvasProject{}, false, false, err
+	}
+	return item, accepted, deduplicated, nil
 }
 
 func DeleteCanvasSaveRequestsBefore(timestamp string) error {

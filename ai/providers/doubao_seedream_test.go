@@ -26,7 +26,7 @@ func TestDoubaoSeedreamNormalizesAndSubmitsACompleteImageRequest(t *testing.T) {
 		if err := json.Unmarshal(data, &body); err != nil {
 			t.Fatalf("request body = %s: %v", data, err)
 		}
-		if body["model"] != "doubao-seedream-5-0-pro-260628" || body["size"] != "2048x1152" || body["output_format"] != "png" || body["response_format"] != "url" || body["watermark"] != false {
+		if body["model"] != "doubao-seedream-5-0-pro-260628" || body["size"] != "2K" || body["output_format"] != "png" || body["response_format"] != "url" || body["watermark"] != false {
 			t.Errorf("request body = %#v", body)
 		}
 		images, ok := body["image"].([]any)
@@ -47,8 +47,7 @@ func TestDoubaoSeedreamNormalizesAndSubmitsACompleteImageRequest(t *testing.T) {
 	adapter := provider.(ai.ImageTaskRequestAdapter)
 	normalized, err := adapter.NormalizeImageTaskRequest(ai.ImageTaskRequest{
 		Request: ai.ImageRequest{Prompt: "将图 1 的服装换为图 2 的服装", Count: 1, Options: ai.ImageRequestOptions{
-			"size":         json.RawMessage(`"16:9"`),
-			"resolution":   json.RawMessage(`"1.5k"`),
+			"resolution":   json.RawMessage(`"2K"`),
 			"outputFormat": json.RawMessage(`"png"`),
 			"background":   json.RawMessage(`"opaque"`),
 			"watermark":    json.RawMessage(`true`),
@@ -58,7 +57,7 @@ func TestDoubaoSeedreamNormalizesAndSubmitsACompleteImageRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NormalizeImageTaskRequest() error = %v", err)
 	}
-	if normalized.Request.Size != "2048x1152" || normalized.Request.Resolution != "1.5k" {
+	if normalized.Request.Size != "2K" || normalized.Request.Resolution != "2K" {
 		t.Fatalf("normalized request = %#v", normalized.Request)
 	}
 	if _, exists := normalized.Request.Options["watermark"]; exists {
@@ -99,7 +98,7 @@ func TestDoubaoSeedreamSummarizesWithoutSecretsOrImageData(t *testing.T) {
 	}
 	adapter := provider.(ai.ImageTaskRequestAdapter)
 	request, err := adapter.NormalizeImageTaskRequest(ai.ImageTaskRequest{
-		Request:    ai.ImageRequest{Prompt: "画一件蓝色外套", Options: ai.ImageRequestOptions{"watermark": json.RawMessage(`false`)}},
+		Request:    ai.ImageRequest{Prompt: "画一件蓝色外套", Options: ai.ImageRequestOptions{"resolution": json.RawMessage(`"2K"`), "watermark": json.RawMessage(`false`)}},
 		References: []ai.ImageReference{{Name: "reference.png", ContentType: "image/png", Data: []byte("do-not-record-me")}},
 	})
 	if err != nil {

@@ -6,7 +6,6 @@ import { dataUrlToFile } from "@/lib/image-utils";
 import { imageToDataUrl } from "@/services/image-storage";
 import { aiApiPath, apiDelete, apiRequestError, debugApiRequest } from "@/services/api/request";
 import type { ReferenceImage } from "@/types/image";
-import { normalizeImageResolution } from "@/lib/image-generation-config";
 import { imageOutputSettings } from "@/lib/image-output-config";
 import { imageEditReferenceError } from "@/lib/image-edit-validation";
 import { createImageMaskFile } from "@/app/(user)/canvas/image-mask/mask-raster";
@@ -18,16 +17,9 @@ type ImageApiResponse = {
     msg?: string;
 };
 
-const QUALITY_ALIASES: Record<string, string> = {
-    "1k": "low",
-    "2k": "medium",
-    "4k": "high",
-};
-
 function normalizeQuality(quality: string) {
-    const value = (quality || "").trim().toLowerCase();
-    const normalized = QUALITY_ALIASES[value] || value;
-    return normalized === "auto" || !normalized ? undefined : normalized;
+    const value = (quality || "").trim();
+    return value === "auto" || !value ? undefined : value;
 }
 
 export type GeneratedImage = { id: string; dataUrl: string; mediaId?: string };
@@ -124,10 +116,11 @@ async function uploadDirectlyToOSS(uploadURL: string, file: File, options: UserI
             if (!event.lengthComputable || event.total <= 0) return;
             options.onProgress?.(Math.min(100, Math.max(0, Math.round((event.loaded / event.total) * 100))));
         };
-        request.onload = () => finish(() => {
-            if (request.status >= 200 && request.status < 300) resolve();
-            else reject(new Error(`上传图片失败：OSS 返回 ${request.status}`));
-        });
+        request.onload = () =>
+            finish(() => {
+                if (request.status >= 200 && request.status < 300) resolve();
+                else reject(new Error(`上传图片失败：OSS 返回 ${request.status}`));
+            });
         request.onerror = () => finish(() => reject(new Error("上传图片失败：无法连接 OSS")));
         request.onabort = () => finish(() => reject(uploadAbortedError()));
         if (options.signal?.aborted) {
@@ -140,12 +133,16 @@ async function uploadDirectlyToOSS(uploadURL: string, file: File, options: UserI
 }
 
 export async function uploadUserImage(file: File, intent: "canvas" | "library" = "library", options: UserImageUploadOptions = {}) {
-    const uploadIntent = await axios.post<ImageApiResponse & { data?: UserImageUploadIntent }>(aiApiPath("/media/upload-intents"), {
-        filename: file.name,
-        contentType: file.type,
-        bytes: file.size,
-        intent,
-    }, { signal: options.signal });
+    const uploadIntent = await axios.post<ImageApiResponse & { data?: UserImageUploadIntent }>(
+        aiApiPath("/media/upload-intents"),
+        {
+            filename: file.name,
+            contentType: file.type,
+            bytes: file.size,
+            intent,
+        },
+        { signal: options.signal },
+    );
     if (uploadIntent.data.code !== 0 || !uploadIntent.data.data?.mode) throw new Error(uploadIntent.data.msg || "申请上传失败");
     if (uploadIntent.data.data.mode === "direct") {
         const { id, uploadUrl } = uploadIntent.data.data;
@@ -184,11 +181,11 @@ function aiHeaders(contentType?: string) {
 export async function requestGeneration(config: AiConfig, prompt: string, clientRequestId: string): Promise<ImageGenerationTask> {
     const quality = normalizeQuality(config.quality);
     const size = (config.size || "").trim();
-    const resolution = config.imageProviderType ? config.resolution : normalizeImageResolution(config.resolution);
+    const resolution = config.resolution.trim();
     const output = imageOutputSettings(config.outputFormat, config.background);
     const body = {
         clientRequestId,
-		...(config.imageProviderId ? { providerId: config.imageProviderId } : {}),
+        ...(config.imageProviderId ? { providerId: config.imageProviderId } : {}),
         prompt,
         n: 1,
         ...(quality ? { quality } : {}),
@@ -196,7 +193,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, client
         ...(resolution ? { resolution } : {}),
         output_format: output.outputFormat,
         background: output.background,
-		providerOptions: config.providerOptions || {},
+        providerOptions: config.providerOptions || {},
         response_format: "b64_json",
     };
     debugApiRequest("image generation", {
@@ -216,17 +213,17 @@ export async function requestGeneration(config: AiConfig, prompt: string, client
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], clientRequestId: string): Promise<ImageGenerationTask> {
     const quality = normalizeQuality(config.quality);
     const size = (config.size || "").trim();
-    const resolution = config.imageProviderType ? config.resolution : normalizeImageResolution(config.resolution);
+    const resolution = config.resolution.trim();
     const output = imageOutputSettings(config.outputFormat, config.background);
     const formData = new FormData();
     formData.set("clientRequestId", clientRequestId);
-	if (config.imageProviderId) formData.set("providerId", config.imageProviderId);
+    if (config.imageProviderId) formData.set("providerId", config.imageProviderId);
     formData.set("prompt", prompt);
     formData.set("n", "1");
     formData.set("response_format", "b64_json");
     formData.set("output_format", output.outputFormat);
     formData.set("background", output.background);
-	formData.set("providerOptions", JSON.stringify(config.providerOptions || {}));
+    formData.set("providerOptions", JSON.stringify(config.providerOptions || {}));
     if (quality) {
         formData.set("quality", quality);
     }
@@ -258,7 +255,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
             ...(resolution ? { resolution } : {}),
             output_format: output.outputFormat,
             background: output.background,
-			providerOptions: config.providerOptions || {},
+            providerOptions: config.providerOptions || {},
             response_format: "b64_json",
         },
         references: useServerMediaReferences ? references.map((image) => ({ mediaId: image.mediaId })) : files.map((file) => ({ name: file.name, type: file.type, size: file.size })),

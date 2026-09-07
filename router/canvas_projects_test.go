@@ -2,6 +2,8 @@ package router
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -61,6 +63,9 @@ func TestCanvasProjectRoutesRequirePortalIdentity(t *testing.T) {
 func TestCanvasProjectOwnerCRUDSanitizesTransientImageContent(t *testing.T) {
 	id := "canvas-crud-" + time.Now().Format("20060102150405.000000000")
 	owner := "canvas-owner-" + id
+	if _, err := repository.SaveMedia(model.Media{ID: "media-1", OwnerUID: owner, Source: model.MediaSourceUpload, ObjectKey: "canvas-crud/media-1"}); err != nil {
+		t.Fatalf("SaveMedia(): %v", err)
+	}
 	document := `{"nodes":[{"id":"image-1","type":"image","title":"图片","position":{"x":0,"y":0},"width":100,"height":80,"metadata":{"content":"blob:https://canvas.local/1","url":"blob:direct","previewUrl":"data:image/png;base64,preview","thumbnailUrl":"https://bucket.example/thumb.png?sig=secret","coverUrl":"https://cdn.example/stable-cover.png","references":["image:stable","blob:reference","data:image/png;base64,reference","https://bucket.example/ref.png?Expires=1","https://cdn.example/stable-reference.png"],"mediaId":"media-1","publicImageId":"public-image-1","mimeType":"image/png","bytes":12,"access":{"url":"https://bucket.example/image.png?X-Amz-Signature=secret","mediaId":"media-1"}}},{"id":"video-1","type":"video","title":"视频","position":{"x":10,"y":10},"width":120,"height":90,"metadata":{"content":"data:video/mp4;base64,abc","storageKey":"video:stable"}},{"id":"text-1","type":"text","title":"文本","position":{"x":20,"y":20},"width":100,"height":60,"metadata":{"content":"https://copy.example/text?X-Goog-Signature=keep-as-text"}},{"id":"config-1","type":"config","title":"配置","position":{"x":30,"y":30},"width":100,"height":60,"metadata":{"content":"data:image/png;base64,keep-as-config"}}],"connections":[{"id":"line-1","fromNodeId":"image-1","toNodeId":"text-1"}],"backgroundMode":"dots","showImageInfo":true,"viewport":{"x":5,"y":8,"k":1.5},"legacyPreview":"data:image/png;base64,keep-as-document-text"}`
 	create := canvasRequest(t, http.MethodPost, "/api/v1/canvas/projects", owner, `{"id":"`+id+`","title":"  我的画布  ","createdAt":"2026-09-02T01:00:00Z","updatedAt":"2026-09-02T01:00:00Z","document":`+document+`}`)
 	if create.Code != http.StatusOK {
@@ -755,24 +760,13 @@ func TestCanvasProjectUpdateReturnsTheExactSnapshotAcceptedBeforeALaterWriter(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	previousSkipDefaultTransaction := database.Config.SkipDefaultTransaction
-	database.Config.SkipDefaultTransaction = true
-	callbackName := "test:block-first-canvas-update-return"
 	firstWriteApplied := make(chan struct{})
 	releaseFirstWriter := make(chan struct{})
-	var updateCount atomic.Int32
-	if err := database.Callback().Update().After("gorm:update").Register(callbackName, func(tx *gorm.DB) {
-		if tx.Statement.Table != "canvas_projects" || updateCount.Add(1) != 1 {
-			return
-		}
-		close(firstWriteApplied)
-		<-releaseFirstWriter
-	}); err != nil {
-		t.Fatal(err)
-	}
+	previousPool, previousStatementPool := database.ConnPool, database.Statement.ConnPool
+	pool := &canvasCommitBarrierPool{ConnPool: previousPool, committed: firstWriteApplied, release: releaseFirstWriter}
+	database.ConnPool, database.Statement.ConnPool = pool, pool
 	t.Cleanup(func() {
-		database.Config.SkipDefaultTransaction = previousSkipDefaultTransaction
-		_ = database.Callback().Update().Remove(callbackName)
+		database.ConnPool, database.Statement.ConnPool = previousPool, previousStatementPool
 	})
 
 	firstResponse := make(chan *httptest.ResponseRecorder, 1)
@@ -805,6 +799,40 @@ func TestCanvasProjectUpdateReturnsTheExactSnapshotAcceptedBeforeALaterWriter(t 
 	if accepted.Title != "第一个写入" || accepted.Revision != 2 || !bytes.Contains(accepted.Document, []byte(`"backgroundMode":"dots"`)) {
 		t.Fatalf("first response exposed a later writer snapshot: %#v, document=%s", accepted, accepted.Document)
 	}
+}
+
+// Block only after the real transaction commits, while its caller has not yet
+// returned. This keeps the response-snapshot regression independent of whether
+// production writes use GORM's default or an explicit transaction.
+type canvasCommitBarrierPool struct {
+	gorm.ConnPool
+	committed chan struct{}
+	release   <-chan struct{}
+	commits   atomic.Int32
+}
+
+func (pool *canvasCommitBarrierPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (gorm.ConnPool, error) {
+	tx, err := pool.ConnPool.(gorm.TxBeginner).BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &canvasCommitBarrierTx{Tx: tx, pool: pool}, nil
+}
+
+type canvasCommitBarrierTx struct {
+	*sql.Tx
+	pool *canvasCommitBarrierPool
+}
+
+func (tx *canvasCommitBarrierTx) Commit() error {
+	if err := tx.Tx.Commit(); err != nil {
+		return err
+	}
+	if tx.pool.commits.Add(1) == 1 {
+		close(tx.pool.committed)
+		<-tx.pool.release
+	}
+	return nil
 }
 
 func assertCanvasDocumentSanitized(t *testing.T, document json.RawMessage) {

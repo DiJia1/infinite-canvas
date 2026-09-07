@@ -72,8 +72,9 @@ func TestMaiziProviderNormalizesPublicRequestOptions(t *testing.T) {
 	if normalized.Request.Resolution != "2k" || normalized.Request.Background != "opaque" || normalized.Request.OutputFormat != "jpeg" || normalized.Request.Size != "1:1" {
 		t.Fatalf("normalized request = %#v", normalized.Request)
 	}
-	if _, err := adapter.NormalizeImageTaskRequest(ai.ImageTaskRequest{Request: ai.ImageRequest{Prompt: "一只猫", Count: 1, Options: ai.ImageRequestOptions{"resolution": json.RawMessage(`"1.5k"`)}}}); err == nil {
-		t.Fatal("NormalizeImageTaskRequest() accepted an unsupported MaiziAI resolution")
+	custom, err := adapter.NormalizeImageTaskRequest(ai.ImageTaskRequest{Request: ai.ImageRequest{Prompt: "一只猫", Count: 1, Options: ai.ImageRequestOptions{"resolution": json.RawMessage(`"1536x1024"`)}}})
+	if err != nil || custom.Request.Resolution != "1536x1024" {
+		t.Fatalf("NormalizeImageTaskRequest() custom resolution = %#v, %v", custom.Request, err)
 	}
 	if _, err := adapter.NormalizeImageTaskRequest(ai.ImageTaskRequest{Request: ai.ImageRequest{Prompt: "编辑", Count: 1}, References: make([]ai.ImageReference, 8)}); err == nil {
 		t.Fatal("NormalizeImageTaskRequest() accepted eight MaiziAI reference images")
@@ -93,6 +94,9 @@ func TestMaiziProviderCreatesAsyncTaskWithoutPolling(t *testing.T) {
 		if !strings.Contains(string(body), `"images":["data:image/png;base64,aGVsbG8="]`) {
 			t.Errorf("task request references = %s", body)
 		}
+		if !strings.Contains(string(body), `"resolution":"1536x1024"`) {
+			t.Errorf("task request resolution = %s", body)
+		}
 		return jsonResponse(`{"data":[{"task_id":"task-created","status":"pending"}]}`), nil
 	})
 
@@ -105,7 +109,7 @@ func TestMaiziProviderCreatesAsyncTaskWithoutPolling(t *testing.T) {
 	if !ok {
 		t.Fatal("MaiziAI provider does not implement ImageTaskProvider")
 	}
-	task, err := tasks.CreateImageTask(context.Background(), ai.ImageTaskRequest{Request: ai.ImageRequest{Prompt: "一只猫", Size: "1:1", Resolution: "1k"}, References: []ai.ImageReference{{ContentType: "image/png", Data: []byte("hello")}}})
+	task, err := tasks.CreateImageTask(context.Background(), ai.ImageTaskRequest{Request: ai.ImageRequest{Prompt: "一只猫", Size: "1:1", Resolution: "1536x1024"}, References: []ai.ImageReference{{ContentType: "image/png", Data: []byte("hello")}}})
 	if err != nil {
 		t.Fatalf("CreateImageTask() error = %v", err)
 	}
