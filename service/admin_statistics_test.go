@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -145,5 +146,25 @@ func TestAggregateImageTaskStatisticsGroupsModelAndUserDetailsByResolution(t *te
 	}
 	if len(users["alice"].Models) != 1 || len(users["alice"].Models[0].Resolutions) != 1 || users["alice"].Models[0].Resolutions[0].Resolution != "2K" || !users["alice"].Models[0].Resolutions[0].Amount.Equal(decimal.RequireFromString("0.5000")) {
 		t.Fatalf("alice resolution details = %#v", users["alice"].Models)
+	}
+}
+
+func TestStatisticsFinalOrderingAndPrecisionDoNotDependOnTaskOrder(t *testing.T) {
+	tasks := []model.ImageGenerationTask{
+		{OwnerUID: "b", ProviderID: "z", ProviderName: "Z", Resolution: "2K", Amount: decimal.RequireFromString("1234567.1234"), AmountRecorded: true, ResultMediaIDsJSON: `["one"]`},
+		{OwnerUID: "a", ProviderID: "a", ProviderName: "A", Resolution: "1K", Amount: decimal.RequireFromString("0.0001"), AmountRecorded: true, ResultMediaIDsJSON: `["two"]`},
+		{OwnerUID: "a", ProviderID: "z", ProviderName: "Z", Resolution: "2K", ResultMediaIDsJSON: `["three","four"]`},
+	}
+	baseline := aggregateImageTaskStatistics(tasks, nil)
+	expected, _ := json.Marshal(baseline)
+	if baseline.Amount.String() != "1234567.1235" || baseline.UnpricedImageCount != 2 || baseline.Models[0].ProviderID != "z" || baseline.Users[0].UserUID != "b" {
+		t.Fatalf("statistics=%s", expected)
+	}
+	for _, order := range [][]int{{2, 1, 0}, {1, 0, 2}, {0, 2, 1}} {
+		reordered := []model.ImageGenerationTask{tasks[order[0]], tasks[order[1]], tasks[order[2]]}
+		actual, _ := json.Marshal(aggregateImageTaskStatistics(reordered, nil))
+		if string(actual) != string(expected) {
+			t.Fatalf("ordering changed: %s != %s", actual, expected)
+		}
 	}
 }

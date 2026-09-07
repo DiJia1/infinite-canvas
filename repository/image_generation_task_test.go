@@ -21,7 +21,7 @@ func TestListSucceededImageGenerationTasksFinishedBetweenReturnsOnlyCompletedTas
 	useImageTaskTestDB(t)
 	items := []model.ImageGenerationTask{
 		{ID: "before", OwnerUID: "user", ClientRequestID: "before", Status: model.ImageTaskSucceeded, FinishedAt: "2026-09-02T15:59:59Z"},
-		{ID: "included", OwnerUID: "user", ClientRequestID: "included", Status: model.ImageTaskSucceeded, FinishedAt: "2026-09-02T16:00:00Z", Amount: decimal.RequireFromString("0.1234"), AmountRecorded: true},
+		{ID: "included", OwnerUID: "included-user", Prompt: strings.Repeat("large", 1000), ProviderConfig: "sensitive-config", ReferencesJSON: `["large-reference"]`, ProviderID: "provider", ProviderName: "model", Resolution: "2K", ResultMediaIDsJSON: `["media"]`, ClientRequestID: "included", Status: model.ImageTaskSucceeded, FinishedAt: "2026-09-02T16:00:00Z", Amount: decimal.RequireFromString("0.1234"), AmountRecorded: true},
 		{ID: "failed", OwnerUID: "user", ClientRequestID: "failed", Status: model.ImageTaskFailed, FinishedAt: "2026-09-02T20:00:00Z"},
 		{ID: "after", OwnerUID: "user", ClientRequestID: "after", Status: model.ImageTaskSucceeded, FinishedAt: "2026-09-03T16:00:00Z"},
 	}
@@ -32,9 +32,16 @@ func TestListSucceededImageGenerationTasksFinishedBetweenReturnsOnlyCompletedTas
 	}
 
 	result, err := ListSucceededImageGenerationTasksFinishedBetween("2026-09-02T16:00:00Z", "2026-09-03T16:00:00Z")
-	if err != nil || len(result) != 1 || result[0].ID != "included" || !result[0].Amount.Equal(decimal.RequireFromString("0.1234")) || !result[0].AmountRecorded {
+	if err != nil || len(result) != 1 || result[0].OwnerUID != "included-user" || !result[0].Amount.Equal(decimal.RequireFromString("0.1234")) || !result[0].AmountRecorded {
 		t.Fatalf("ListSucceededImageGenerationTasksFinishedBetween() = %#v, %v", result, err)
 	}
+	if result[0].Prompt != "" || result[0].ProviderConfig != "" || result[0].ReferencesJSON != "" {
+		t.Fatal("statistics loaded unrelated payload fields")
+	}
+	if result[0].ProviderID != "provider" || result[0].ProviderName != "model" || result[0].Resolution != "2K" || result[0].ResultMediaIDsJSON != `["media"]` {
+		t.Fatalf("missing statistics fields: %#v", result[0])
+	}
+
 }
 
 func TestCreateImageGenerationTaskIsIdempotentPerOwnerAndClientRequest(t *testing.T) {

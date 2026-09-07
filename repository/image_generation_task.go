@@ -201,8 +201,8 @@ func ListSucceededImageGenerationTasksFinishedBetween(start, end string) ([]mode
 		return nil, err
 	}
 	items := make([]model.ImageGenerationTask, 0)
-	err = database.Where("status = ? AND finished_at >= ? AND finished_at < ?", model.ImageTaskSucceeded, start, end).
-		Order("provider_name asc, provider_id asc, id asc").Find(&items).Error
+	err = database.Select("owner_uid", "provider_id", "provider_name", "resolution", "result_media_ids_json", "amount", "amount_recorded").
+		Where("status = ? AND finished_at >= ? AND finished_at < ?", model.ImageTaskSucceeded, start, end).Find(&items).Error
 	return items, err
 }
 
