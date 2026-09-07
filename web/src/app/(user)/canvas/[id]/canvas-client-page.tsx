@@ -1966,10 +1966,6 @@ function InfiniteCanvasPage() {
                         setSelectedNodeIds(new Set(result.nodeIds));
                         setSelectedConnectionId(null);
                         setDialogNodeId(null);
-                        void useAssetStore
-                            .getState()
-                            .refreshFromServer()
-                            .catch(() => undefined);
                     }
                     const summary = [`已添加 ${result.nodeIds.length} 张图片`];
                     if (result.failedCount) summary.push(`${result.failedCount} 张上传失败`);

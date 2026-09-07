@@ -1,5 +1,7 @@
 "use client";
 
+import { createAssetRefreshScheduler } from "./asset-refresh-scheduler";
+
 import { create } from "zustand";
 import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
 
@@ -147,6 +149,23 @@ const assetStorage: PersistStorage<AssetStore> = {
     removeItem: (name) => localForageStorage.removeItem(name),
 };
 
+const catalogRefresh = createAssetRefreshScheduler({
+    load: async () => {
+        // Finish both requests even on failure before allowing another round.
+        const [images, folders] = await Promise.allSettled([fetchPrivateImages(), fetchPrivateFolders()]);
+        if (images.status === "rejected") throw images.reason;
+        if (folders.status === "rejected") throw folders.reason;
+        return privateCatalogToAssetState(images.value, folders.value);
+    },
+    commit: async (next, isCurrent) => {
+        if (!isCurrent()) return;
+        const previous = useAssetStore.getState().assets;
+        useAssetStore.setState(next);
+        // Subscribers can synchronously switch scope or request another refresh.
+        if (isCurrent()) await discardMissingPrivateMediaCache(previous, next.assets);
+    },
+});
+
 export const useAssetStore = create<AssetStore>()(
     persist(
         (set, get) => ({
@@ -243,28 +262,21 @@ export const useAssetStore = create<AssetStore>()(
                 }, 0);
             },
             hydrate: async (uid) => {
+                const scope = catalogRefresh.reset();
                 const name = `${ASSET_STORE_KEY}:${portalStorageScope(uid)}`;
                 useAssetStore.persist.setOptions({ name });
-                await useAssetStore.persist.rehydrate();
                 try {
-                    const [images, folders] = await Promise.all([fetchPrivateImages(), fetchPrivateFolders()]);
-                    if (useAssetStore.persist.getOptions().name === name) {
-                        const next = privateCatalogToAssetState(images, folders);
-                        const previous = get().assets;
-                        set(next);
-                        await discardMissingPrivateMediaCache(previous, next.assets);
-                    }
+                    await useAssetStore.persist.rehydrate();
+                    if (!scope.isCurrent()) return;
+                    scope.resume();
+                    await catalogRefresh.refresh();
                 } catch {
-                    // The cached catalog remains available when the Portal session or API is temporarily unavailable.
+                    // Keep the cached catalog available if the remote API is unavailable.
+                } finally {
+                    scope.resume();
                 }
             },
-            refreshFromServer: async () => {
-                const [images, folders] = await Promise.all([fetchPrivateImages(), fetchPrivateFolders()]);
-                const next = privateCatalogToAssetState(images, folders);
-                const previous = get().assets;
-                set(next);
-                await discardMissingPrivateMediaCache(previous, next.assets);
-            },
+            refreshFromServer: catalogRefresh.refresh,
         }),
         {
             name: ASSET_STORE_KEY,
