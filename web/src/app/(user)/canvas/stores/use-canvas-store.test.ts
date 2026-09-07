@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 import { ApiRequestError } from "@/services/api/request";
 import type { CanvasProjectRecord, CanvasProjectsApi } from "@/services/api/canvas-projects";
@@ -522,28 +522,47 @@ test("serializes writes for one project while preserving edits made during a sav
 });
 
 test("keeps the debounce delay after an in-flight save receives more drag updates", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
     const firstSave = Promise.withResolvers<void>();
-    let saveCount = 0;
+    const firstStarted = Promise.withResolvers<void>();
+    const firstSettled = Promise.withResolvers<void>();
+    const secondSettled = Promise.withResolvers<void>();
+    const titles: string[] = [];
     const { api } = apiDouble({
         update: async (id, input) => {
-            saveCount += 1;
-            if (saveCount === 1) await firstSave.promise;
+            titles.push(input.title);
+            if (titles.length === 1) {
+                firstStarted.resolve();
+                await firstSave.promise;
+            }
             return serverProject({ id, title: input.title, document: input.document, revision: input.revision + 1 });
         },
     });
     const store = createCanvasStore({ api, serverDebounceMs: 50, isOnline: () => true });
-    store.getState().replaceProjectsFromServer([serverProject()]);
-    store.getState().startSync("portal-user");
-
-    store.getState().renameProject("project-1", "拖动开始");
-    await new Promise((resolve) => setTimeout(resolve, 55));
-    store.getState().renameProject("project-1", "拖动结束");
-    firstSave.resolve();
-
-    await new Promise((resolve) => setTimeout(resolve, 15));
-    assert.equal(saveCount, 1);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(saveCount, 2);
+    const unsubscribe = store.subscribe((state) => {
+        if (state.projectSync["project-1"]?.serverRevision === 2) firstSettled.resolve();
+        if (state.projectSync["project-1"]?.serverRevision === 3) secondSettled.resolve();
+    });
+    try {
+        store.getState().replaceProjectsFromServer([serverProject()]);
+        store.getState().startSync("portal-user");
+        store.getState().renameProject("project-1", "拖动开始");
+        mock.timers.tick(50);
+        await firstStarted.promise;
+        store.getState().renameProject("project-1", "拖动结束");
+        firstSave.resolve();
+        await firstSettled.promise;
+        mock.timers.tick(49);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.deepEqual(titles, ["拖动开始"]);
+        mock.timers.tick(1);
+        await secondSettled.promise;
+        assert.deepEqual(titles, ["拖动开始", "拖动结束"]);
+    } finally {
+        firstSave.resolve();
+        unsubscribe();
+        mock.timers.reset();
+    }
 });
 
 test("serializes deletion after an in-flight save without saving the deleted project again", async () => {
