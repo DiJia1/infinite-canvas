@@ -279,16 +279,23 @@ func TestCanvasCleanupClaimRejectsAllNewCanvasReferences(t *testing.T) {
 
 func TestCanvasCleanupLeaseTakeoverFencesOldDelete(t *testing.T) {
 	_, current := seedCleanupProtocolMedia(t, "cleanup_lease_takeover")
+	current = current.Truncate(time.Second).Add(123456789 * time.Nanosecond)
 	first, claimed, err := ClaimCanvasMediaCleanup("image", current, time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("first claim: %v %v", claimed, err)
+	}
+	// Compare stored values: the initial claim returns Go's nanosecond timestamp,
+	// while PostgreSQL preserves only microseconds when a worker reads it back.
+	persisted, found, err := GetMedia("image")
+	if err != nil || !found || persisted.CleanupStartedAt == nil || !persisted.CleanupStartedAt.Equal(current.Truncate(time.Microsecond)) {
+		t.Fatalf("persisted first claim: %#v, found %v, err %v", persisted, found, err)
 	}
 	next, claimed, err := ClaimCanvasMediaCleanup("image", current.Add(time.Minute), time.Minute)
 	if err != nil || !claimed || next.CleanupClaimID == first.CleanupClaimID || next.CleanupClaimID == "" {
 		t.Fatalf("takeover: %#v %v %v", next, claimed, err)
 	}
-	if first.CleanupStartedAt == nil || next.CleanupStartedAt == nil || !first.CleanupStartedAt.Equal(*next.CleanupStartedAt) {
-		t.Fatal("takeover reset initial deletion timestamp")
+	if next.CleanupStartedAt == nil || !persisted.CleanupStartedAt.Equal(*next.CleanupStartedAt) {
+		t.Fatalf("takeover changed deletion timestamp: before %v, after %v", persisted.CleanupStartedAt, next.CleanupStartedAt)
 	}
 	if deleted, err := DeleteClaimedCanvasMedia("image", first.CleanupClaimID); err != nil || deleted {
 		t.Fatalf("stale delete: %v %v", deleted, err)
