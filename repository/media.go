@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/basketikun/infinite-canvas/model"
@@ -64,13 +65,17 @@ func SetPrivateMediaExpiry(id, ownerUID string, expiresAt *time.Time) (bool, err
 }
 
 func ListExpiredPrivateMedia(before time.Time) ([]model.Media, error) {
+	return ListExpiredPrivateMediaAfter(before, "")
+}
+
+func ListExpiredPrivateMediaAfter(before time.Time, afterID string) ([]model.Media, error) {
 	db, err := DB()
 	if err != nil {
 		return nil, err
 	}
 	items := make([]model.Media, 0)
 	err = db.Where("(cleanup_status = ? AND expires_at IS NOT NULL AND expires_at <= ?) OR (cleanup_status = ? AND (cleanup_lease_until IS NULL OR cleanup_lease_until <= ?))",
-		model.MediaCleanupActive, before.UTC(), model.MediaCleanupDeleting, before.UTC()).Order("expires_at asc, id asc").Find(&items).Error
+		model.MediaCleanupActive, before.UTC(), model.MediaCleanupDeleting, before.UTC()).Where("id > ?", afterID).Order("id asc").Limit(100).Find(&items).Error
 	return items, err
 }
 
@@ -111,62 +116,121 @@ func UpdatePrivateMedia(id, ownerUID string, title *string, folderID *string) (m
 // ClaimCanvasMediaCleanup shares the media row lock with Canvas writes. A lease
 // only assigns a deletion attempt; expiry never makes deleting media usable.
 func ClaimCanvasMediaCleanup(id string, current time.Time, lease time.Duration) (model.Media, bool, error) {
-	db, err := DB()
-	if err != nil {
+	items, err := ClaimCanvasMediaCleanupBatch([]string{id}, current, lease)
+	if err != nil || len(items) == 0 {
 		return model.Media{}, false, err
 	}
-	var item model.Media
-	claimed := false
+	return items[0], true, nil
+}
+
+// Lock the entire batch before reading references. Canvas writers use the same
+// sorted media locks, so a shared owner snapshot stays valid until commit.
+func ClaimCanvasMediaCleanupBatch(ids []string, current time.Time, lease time.Duration) ([]model.Media, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	db, err := DB()
+	if err != nil {
+		return nil, err
+	}
+	var claimed []model.Media
+	var referenceErrors []error
 	err = db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&item, "id = ?", id).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil
-			}
+		var items []model.Media
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id IN ?", ids).Order("id").Find(&items).Error; err != nil {
 			return err
 		}
-		switch item.CleanupStatus {
-		case model.MediaCleanupActive:
-			if item.ExpiresAt == nil || item.ExpiresAt.After(current) {
-				return nil
+		eligible := items[:0]
+		for _, item := range items {
+			if item.CleanupStatus == model.MediaCleanupActive && item.ExpiresAt != nil && !item.ExpiresAt.After(current) ||
+				item.CleanupStatus == model.MediaCleanupDeleting && (item.CleanupLeaseUntil == nil || !item.CleanupLeaseUntil.After(current)) {
+				eligible = append(eligible, item)
 			}
-		case model.MediaCleanupDeleting:
-			if item.CleanupLeaseUntil != nil && item.CleanupLeaseUntil.After(current) {
-				return nil
-			}
-		default:
+		}
+		if len(eligible) == 0 {
 			return nil
 		}
-		referenced, err := MediaStillReferenced(tx, item.OwnerUID, item.ID)
-		if err != nil {
+		eligibleIDs := make([]string, 0, len(eligible))
+		for _, item := range eligible {
+			eligibleIDs = append(eligibleIDs, item.ID)
+		}
+		var publicItems []model.PublicImage
+		if err := tx.Select("media_id").Where("media_id IN ?", eligibleIDs).Find(&publicItems).Error; err != nil {
 			return err
 		}
-		if referenced {
-			if item.CleanupStatus == model.MediaCleanupDeleting {
-				return errors.New("deleting media has a persisted reference")
+		public := make(map[string]bool, len(publicItems))
+		for _, item := range publicItems {
+			public[item.MediaID] = true
+		}
+		references := make(map[string]map[string]struct{})
+		invalidOwners := make(map[string]error)
+		for _, item := range eligible {
+			if invalidOwners[item.OwnerUID] != nil {
+				continue
 			}
-			return tx.Model(&model.Media{}).Where("id = ?", item.ID).Update("expires_at", nil).Error
+			referenced := public[item.ID]
+			if !referenced {
+				refs, loaded := references[item.OwnerUID]
+				if !loaded {
+					var err error
+					refs, err = canvasMediaReferences(tx, item.OwnerUID)
+					if err != nil {
+						if !errors.Is(err, ErrCanvasMediaInvalidDocument) {
+							return err
+						}
+						invalidOwners[item.OwnerUID] = err
+						referenceErrors = append(referenceErrors, fmt.Errorf("owner %s: %w", item.OwnerUID, err))
+						continue
+					}
+					references[item.OwnerUID] = refs
+				}
+				_, referenced = refs[item.ID]
+			}
+			if referenced {
+				if item.CleanupStatus == model.MediaCleanupDeleting {
+					return errors.New("deleting media has a persisted reference")
+				}
+				if err := tx.Model(&model.Media{}).Where("id = ?", item.ID).Update("expires_at", nil).Error; err != nil {
+					return err
+				}
+				continue
+			}
+			started := current.UTC()
+			until := started.Add(lease)
+			if item.CleanupStartedAt == nil {
+				item.CleanupStartedAt = &started
+			}
+			item.CleanupStatus = model.MediaCleanupDeleting
+			item.CleanupClaimID = uuid.NewString()
+			item.CleanupLeaseUntil = &until
+			if err := tx.Model(&model.Media{}).Where("id = ?", item.ID).Updates(map[string]any{
+				"cleanup_status": item.CleanupStatus, "cleanup_started_at": item.CleanupStartedAt,
+				"cleanup_claim_id": item.CleanupClaimID, "cleanup_lease_until": item.CleanupLeaseUntil,
+			}).Error; err != nil {
+				return err
+			}
+			claimed = append(claimed, item)
 		}
-		started := current.UTC()
-		if item.CleanupStartedAt == nil {
-			item.CleanupStartedAt = &started
-		}
-		until := current.UTC().Add(lease)
-		item.CleanupStatus = model.MediaCleanupDeleting
-		item.CleanupClaimID = uuid.NewString()
-		item.CleanupLeaseUntil = &until
-		if err := tx.Model(&model.Media{}).Where("id = ?", item.ID).Updates(map[string]any{
-			"cleanup_status": item.CleanupStatus, "cleanup_started_at": item.CleanupStartedAt,
-			"cleanup_claim_id": item.CleanupClaimID, "cleanup_lease_until": item.CleanupLeaseUntil,
-		}).Error; err != nil {
-			return err
-		}
-		claimed = true
 		return nil
 	})
 	if err != nil {
-		return model.Media{}, false, err
+		return nil, err
 	}
-	return item, claimed, nil
+	return claimed, errors.Join(referenceErrors...)
+}
+
+// Renew only the same deleting claim. An expired lease may be resumed until a
+// competing worker replaces its token; the conditional update fences that race.
+func RenewCanvasMediaCleanupClaim(id, claimID string, current time.Time, lease time.Duration) (bool, error) {
+	if claimID == "" {
+		return false, nil
+	}
+	db, err := DB()
+	if err != nil {
+		return false, err
+	}
+	result := db.Model(&model.Media{}).Where("id = ? AND cleanup_status = ? AND cleanup_claim_id = ?", id, model.MediaCleanupDeleting, claimID).Update("cleanup_lease_until", current.UTC().Add(lease))
+	return result.RowsAffected > 0, result.Error
 }
 
 func DeleteClaimedCanvasMedia(id, claimID string) (bool, error) {

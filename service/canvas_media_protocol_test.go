@@ -355,3 +355,35 @@ func TestDeletingCanvasMediaCannotBeAccessedOrShared(t *testing.T) {
 		t.Error("deleting media accepted as a share source")
 	}
 }
+
+func TestCanvasCleanupSlowFailuresDoNotStarveLaterClaims(t *testing.T) {
+	now := time.Now().UTC()
+	expiry := now.Add(-time.Minute)
+	var ids []string
+	for i := 0; i < 6; i++ {
+		item := saveTestPrivateMedia(t, fmt.Sprintf("slow-claim-%d", i), "slow-claim-owner", &expiry)
+		ids = append(ids, item.ID)
+	}
+	claimed, err := repository.ClaimCanvasMediaCleanupBatch(ids, now, canvasMediaCleanupLease)
+	if err != nil || len(claimed) != 6 {
+		t.Fatalf("claims=%d err=%v", len(claimed), err)
+	}
+	attempts := 0
+	store := canvasCleanupTestStore{delete: func(context.Context, string) error {
+		attempts++
+		now = now.Add(30 * time.Second)
+		if attempts <= 5 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}}
+	if err := deleteClaimedCanvasMedia(context.Background(), store, claimed, func() time.Time { return now }); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 6 {
+		t.Fatalf("attempts=%d", attempts)
+	}
+	if _, found, err := repository.GetMedia(ids[5]); err != nil || found {
+		t.Fatalf("healthy trailing media remains: %v %v", found, err)
+	}
+}

@@ -93,8 +93,9 @@ func awaitCleanupLockWait(t *testing.T, database *gorm.DB, pids <-chan int) {
 
 func cleanupMediaLockQuery(tx *gorm.DB) bool {
 	_, isMedia := tx.Statement.Dest.(*model.Media)
+	_, isBatch := tx.Statement.Dest.(*[]model.Media)
 	_, locking := tx.Statement.Clauses["FOR"]
-	return isMedia && locking
+	return (isMedia || isBatch) && locking
 }
 
 func sendCleanupBackendPID(tx *gorm.DB, pids chan<- int) {
@@ -187,7 +188,12 @@ func TestCanvasCleanupWaitsForReferenceRestoreTransaction(t *testing.T) {
 	}
 	if err := database.Callback().Query().Before("gorm:query").Register(queryName, func(tx *gorm.DB) {
 		if cleanupMediaLockQuery(tx) {
-			sendCleanupBackendPID(tx, pids)
+			// Only observe the cleanup query after the writer reaches its barrier.
+			select {
+			case <-restored:
+				sendCleanupBackendPID(tx, pids)
+			default:
+			}
 		}
 	}); err != nil {
 		t.Fatal(err)

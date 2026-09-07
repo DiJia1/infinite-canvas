@@ -183,20 +183,3 @@ func canvasMediaReferences(tx *gorm.DB, ownerUID string) (map[string]struct{}, e
 	}
 	return references, rows.Err()
 }
-
-// MediaStillReferenced must run in the transaction holding the media row lock.
-func MediaStillReferenced(tx *gorm.DB, ownerUID, mediaID string) (bool, error) {
-	var count int64
-	if err := tx.Model(&model.PublicImage{}).Where("media_id = ?", mediaID).Count(&count).Error; err != nil {
-		return false, err
-	}
-	if count > 0 {
-		return true, nil
-	}
-	refs, err := canvasMediaReferences(tx, ownerUID)
-	if err != nil {
-		return false, err
-	}
-	_, found := refs[mediaID]
-	return found, nil
-}

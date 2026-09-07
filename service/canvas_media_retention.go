@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/basketikun/infinite-canvas/model"
 	"github.com/basketikun/infinite-canvas/repository"
 )
 
@@ -17,24 +18,53 @@ func CleanupExpiredCanvasMedia(current time.Time) error {
 }
 
 func cleanupExpiredCanvasMedia(ctx context.Context, current time.Time, createStore func() (imageStore, error)) error {
-	items, err := repository.ListExpiredPrivateMedia(current)
-	if err != nil {
-		return err
-	}
+	started := time.Now()
 	store, err := createStore()
 	if err != nil {
 		return err
 	}
-	for _, candidate := range items {
+	afterID := ""
+	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		item, claimed, err := repository.ClaimCanvasMediaCleanup(candidate.ID, current, canvasMediaCleanupLease)
+		items, err := repository.ListExpiredPrivateMediaAfter(current, afterID)
 		if err != nil {
-			log.Printf("canvas media cleanup claim failed media_id=%s: %v", candidate.ID, err)
+			return err
+		}
+		if len(items) == 0 {
+			break
+		}
+		afterID = items[len(items)-1].ID
+		ids := make([]string, 0, len(items))
+		for _, candidate := range items {
+			ids = append(ids, candidate.ID)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		claimed, err := repository.ClaimCanvasMediaCleanupBatch(ids, current.Add(time.Since(started)), canvasMediaCleanupLease)
+		if err != nil {
+			log.Printf("canvas media cleanup batch claim failed: %v", err)
+		}
+		if err := deleteClaimedCanvasMedia(ctx, store, claimed, func() time.Time { return current.Add(time.Since(started)) }); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteClaimedCanvasMedia(ctx context.Context, store imageStore, claimed []model.Media, now func() time.Time) error {
+	for _, item := range claimed {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		renewed, err := repository.RenewCanvasMediaCleanupClaim(item.ID, item.CleanupClaimID, now(), canvasMediaCleanupLease)
+		if err != nil {
+			log.Printf("canvas media cleanup renewal failed media_id=%s: %v", item.ID, err)
 			continue
 		}
-		if !claimed {
+		if !renewed {
 			continue
 		}
 		deleteCtx, cancel := context.WithTimeout(ctx, canvasMediaDeleteTimeout)
@@ -63,8 +93,8 @@ func StartCanvasMediaRetention(ctx context.Context) func() {
 			select {
 			case <-ctx.Done():
 				return
-			case current := <-ticker.C:
-				if err := cleanupExpiredCanvasMedia(ctx, current, newImageStore); err != nil {
+			case <-ticker.C:
+				if err := cleanupExpiredCanvasMedia(ctx, time.Now(), newImageStore); err != nil {
 					log.Printf("canvas media cleanup failed: %v", err)
 				}
 			}
