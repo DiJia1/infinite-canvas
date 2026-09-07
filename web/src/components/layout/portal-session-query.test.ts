@@ -25,7 +25,7 @@ const rootUID = expression("./client-root-init.tsx", (node) => ts.isVariableDecl
 const hydrationEffect = expression("./client-root-init.tsx", (node) => ts.isArrowFunction(node) && node.getText().includes("let disposed = false"));
 function hydrate(uid: string | undefined) {
     const seen: string[] = [];
-    const effect = new Function("uid", "setImageStorageScope", "hydrateCanvas", "hydrateAssets", "retryCanvasBootstrapOnOnline", "useCanvasStore", hydrationEffect)(
+    const effect = new Function("uid", "setImageStorageScope", "hydrateCanvas", "hydrateAssets", "retryCanvasBootstrapOnOnline", "useCanvasStore", "hydrationScope", hydrationEffect)(
         uid,
         (id: string) => seen.push(`scope:${id}`),
         async (id: string) => {
@@ -36,6 +36,7 @@ function hydrate(uid: string | undefined) {
         },
         () => ({ dispose() {}, attempt: async () => undefined }),
         { getState: () => ({ setBootstrapRetry() {} }) },
+        { current: null },
     );
     const dispose = effect();
     dispose?.();
@@ -102,5 +103,57 @@ test("failed session request rejects instead of populating a stale session", asy
     } finally {
         client.clear();
         axios.defaults.adapter = original;
+    }
+});
+
+test("a changed UID reloads before an initialized Canvas store can bootstrap under another user", async () => {
+    const { createCanvasStore } = await import("../../app/(user)/canvas/stores/use-canvas-store");
+    for (const [previousUID, nextUID] of [["A", "B"], ["A", "guest"], ["guest", "A"], ["A", "A"]]) {
+        const store = createCanvasStore();
+        await store.getState().hydrate(previousUID);
+        const calls: string[] = [];
+        let reloads = 0;
+        const effect = new Function("uid", "window", "setImageStorageScope", "hydrateCanvas", "hydrateAssets", "retryCanvasBootstrapOnOnline", "useCanvasStore", "hydrationScope", hydrationEffect)(
+            nextUID,
+            { location: { reload: () => reloads++ } },
+            (uid: string) => calls.push(`scope:${uid}`),
+            async (uid: string) => { calls.push(`canvas:${uid}`); await store.getState().hydrate(uid); },
+            async (uid: string) => { calls.push(`assets:${uid}`); },
+            () => { assert.fail("must not start a bootstrap using the previous user's projects"); },
+            store,
+            { current: null },
+        );
+        const dispose = effect();
+        dispose?.();
+        assert.equal(reloads, previousUID === nextUID ? 0 : 1);
+        assert.deepEqual(calls, previousUID === nextUID ? ["scope:A", "canvas:A", "assets:A"] : []);
+        assert.equal(store.getState().syncScope, previousUID, "the old store must be discarded by navigation, not relabeled");
+    }
+});
+
+
+test("a UID change during initial hydration reloads before starting another hydration", async () => {
+    const pending = Promise.withResolvers<void>();
+    const hydrationScope = { current: null as string | null };
+    let reloads = 0;
+    const calls: string[] = [];
+    const effect = (uid: string) => new Function("uid", "window", "setImageStorageScope", "hydrateCanvas", "hydrateAssets", "useCanvasStore", "hydrationScope", hydrationEffect)(
+        uid, { location: { reload: () => reloads++ } },
+        (id: string) => calls.push(`scope:${id}`),
+        (id: string) => { calls.push(`canvas:${id}`); return pending.promise; },
+        async (id: string) => { calls.push(`assets:${id}`); },
+        { getState: () => ({ syncScope: null, setBootstrapRetry() {} }) }, hydrationScope,
+    )();
+    const dispose = effect("A");
+    try {
+        assert.equal(hydrationScope.current, "A");
+        dispose();
+        effect("B");
+        assert.equal(reloads, 1);
+        assert.deepEqual(calls, ["scope:A", "canvas:A", "assets:A"]);
+    } finally {
+        dispose();
+        pending.resolve();
+        await pending.promise;
     }
 });

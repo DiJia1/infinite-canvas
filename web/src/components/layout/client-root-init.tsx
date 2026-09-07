@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { portalSessionQuery } from "@/services/api/session";
@@ -17,6 +17,7 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
     const hydrateAssets = useAssetStore((state) => state.hydrate);
     const loadPublicSettings = useConfigStore((state) => state.loadPublicSettings);
     const pathname = usePathname();
+    const hydrationScope = useRef<string | null>(null);
     const session = useQuery(portalSessionQuery);
     const uid = session.isPending ? undefined : session.isError ? "guest" : session.data?.user?.uid || "guest";
 
@@ -26,6 +27,14 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
 
     useEffect(() => {
         if (uid === undefined) return;
+        const canvasScope = hydrationScope.current || useCanvasStore.getState().syncScope;
+        if (canvasScope && canvasScope !== uid) {
+            // Canvas hydration is one-shot. Recreate the page before another
+            // session can bootstrap or import the previous user's local projects.
+            window.location.reload();
+            return;
+        }
+        hydrationScope.current = uid;
         let disposed = false;
         let bootstrapRetry: ReturnType<typeof retryCanvasBootstrapOnOnline> | null = null;
         void (async () => {
