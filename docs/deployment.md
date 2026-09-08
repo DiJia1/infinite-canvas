@@ -61,7 +61,7 @@ docker compose --project-name infinite-canvas \
 docker logout ghcr.io
 ```
 
-初始化脚本只会在容器 healthcheck 通过后记录最后健康版本。
+初始化脚本只会在 Compose 配置有效、容器实际镜像引用及镜像 ID 均匹配、healthcheck 通过后记录首个健康版本；不会虚构上一版本。
 
 ## 常规发布与回滚
 
@@ -73,7 +73,32 @@ ghcr.io/dijia1/infinite-canvas:sha-<GITHUB_SHA>
 
 随后部署 Job 通过严格 known-host 校验连接服务器，上传该 SHA 对应的 Compose 与部署脚本，临时登录 GHCR、拉取指定镜像并重建唯一的 `app` 服务。
 
-部署在 60 秒内未达到健康状态时，会用最后健康 release 的 Compose 和镜像自动恢复。数据库仍沿用应用启动时的 GORM 自动迁移；应用镜像回滚不会回退数据库 schema 或数据。
+手动触发的工作流也只有 `main` 分支可以执行生产部署。发布前检查当前记录的 Compose、容器镜像引用、镜像 ID 和健康状态，任何不一致都会停止发布。目标镜像标签中的 SHA 必须与发布 SHA 完全一致。
+
+部署后最多检查 90 次健康状态，间隔 2 秒（等待窗口约 180 秒，Docker 命令自身耗时另计）。失败时使用**此次发布开始前的当前健康版本**的 Compose 和镜像恢复，任务仍返回失败；不会跳过当前版本而回退到更早的 previous。数据库仍沿用应用启动时的 GORM 自动迁移；应用镜像回滚不会回退数据库 schema 或数据。
+
+## 版本记录与历史镜像清理
+
+状态文件仍为 `/program/data/infinite-canvas/infinite-canvas-release.last-known-good`。版本 2 同时记录 current 与 previous 的 SHA、镜像引用和 release 目录。只在目标容器镜像及健康检查通过后，以权限 `0600` 的临时文件原子替换状态。不同 SHA 发布成功时，原 current 成为 previous；同 SHA 重发保留原 previous。
+
+旧的三行状态文件仍可读取，但必须通过实际容器校验，才允许后续发布并转换为版本 2。首次初始化或仅有一个健康版本时，自动清理跳过；第二个不同版本发布成功后才具备清理条件。状态损坏、镜像缺失、保护信息无法读取时，不执行清理。
+
+每次发布成功并提交状态后，脚本在同一发布锁内自动清理本机历史镜像：
+
+- 只处理 `ghcr.io/dijia1/infinite-canvas:sha-<40 位 SHA>`，按完整引用逐个删除，不使用强制删除或全局 prune。
+- 保护 current、previous、此次发布目标，以及所有运行或停止容器引用的镜像 ID。多个标签指向同一个受保护 ID 时，一并保留。
+- 删除前再次检查标签 ID 和容器引用；清理失败输出警告，不回滚已经健康的服务。
+- 不清理 GHCR 远端镜像、release 目录、数据卷、构建缓存、无标签镜像或其他应用镜像。
+
+上线前先核对生产状态、容器镜像和健康检查，再在已上传的新 release 目录运行预览：
+
+```bash
+bash "$RELEASE_DIR/scripts/cleanup-release-images.sh" --dry-run
+```
+
+确认输出范围后，可在受控维护中执行 `--apply`。独立执行同样获取发布锁，避免与发布同时运行。脚本依赖生产 Linux 上现有的 Bash、flock 和 Docker Compose；预览和应用均不访问视频或图片数据。
+
+CI 在镜像构建前执行 Shell 语法、Compose 配置检查及 Go 中的模拟 Docker 行为测试。模拟测试不操作本机 Docker 镜像，不能替代首次上线时对真实服务器状态的核对。
 
 ## PostgreSQL 变更前的备份与恢复验证
 

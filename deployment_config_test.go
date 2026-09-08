@@ -72,6 +72,11 @@ func TestReleaseWorkflowBuildsAndDeploysPrivateImageSecurely(t *testing.T) {
 		"environment: production",
 		"group: infinite-canvas-production",
 		"cancel-in-progress: false",
+		"if: github.ref == 'refs/heads/main'",
+		"scripts/cleanup-release-images.sh",
+		"scripts/release-state.sh",
+		"bash -n",
+		"docker compose config -q",
 		"DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}",
 		"DEPLOY_USER: ${{ secrets.DEPLOY_USER }}",
 		"DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}",
@@ -120,7 +125,7 @@ func TestDatabaseConfigurationIsPostgresOnly(t *testing.T) {
 }
 
 func TestReleaseScriptsProtectAndRestoreKnownGoodVersion(t *testing.T) {
-	deploy := readDeploymentFile(t, "scripts/deploy-production.sh")
+	deploy := readDeploymentFile(t, "scripts/deploy-production.sh") + readDeploymentFile(t, "scripts/release-state.sh")
 	initialize := readDeploymentFile(t, "scripts/initialize-release-state.sh")
 	for _, expected := range []string{
 		"set -Eeuo pipefail",

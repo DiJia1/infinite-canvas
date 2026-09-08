@@ -38,6 +38,13 @@ jobs:
         with:
           bun-version: "1.4.0"
 
+      - name: Validate release scripts and Compose
+        run: |
+          bash -n scripts/deploy-production.sh scripts/initialize-release-state.sh scripts/release-state.sh scripts/cleanup-release-images.sh
+          env_file=$(mktemp)
+          trap 'rm -f "$env_file"' EXIT
+          INFINITE_CANVAS_IMAGE=ghcr.io/dijia1/infinite-canvas:sha-${{ github.sha }} INFINITE_CANVAS_ENV_FILE="$env_file" docker compose config -q
+
       - run: go test ./...
 
       - working-directory: web
@@ -79,6 +86,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy-production:
+    if: github.ref == 'refs/heads/main'
     needs: build-and-push
     runs-on: ubuntu-latest
     environment: production
@@ -114,7 +122,7 @@ jobs:
             -o UserKnownHostsFile="$known_hosts_file"
           )
           release_dir="/program/apps/infinite-canvas/releases/$DEPLOY_SHA"
-          tar -czf - docker-compose.yml scripts/deploy-production.sh scripts/initialize-release-state.sh | ssh "${ssh_options[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "
+          tar -czf - docker-compose.yml scripts/deploy-production.sh scripts/initialize-release-state.sh scripts/release-state.sh scripts/cleanup-release-images.sh | ssh "${ssh_options[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "
             set -Eeuo pipefail
             mkdir -p '$release_dir'
             tar -xzf - -C '$release_dir'
