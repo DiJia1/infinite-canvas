@@ -1,14 +1,18 @@
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeMetadata } from "../types";
 
-export type CanvasImageNodeWithContent = CanvasNodeData & {
+export type CanvasImageNodeWithReference = CanvasNodeData & {
     type: CanvasNodeType.Image;
-    metadata: CanvasNodeMetadata & { content: string };
+    metadata: CanvasNodeMetadata;
 };
 
-export function canSaveNodeAsAsset(node: CanvasNodeData): node is CanvasImageNodeWithContent {
-    return node.type === CanvasNodeType.Image && !node.metadata?.localUploadState && Boolean(node.metadata?.content);
+export function hasCanvasImage(node: CanvasNodeData | null | undefined): node is CanvasImageNodeWithReference {
+    return node?.type === CanvasNodeType.Image && [node.metadata?.mediaId, node.metadata?.publicImageId, node.metadata?.storageKey, node.metadata?.content].some((value) => Boolean(value?.trim()));
+}
+
+export function canSaveNodeAsAsset(node: CanvasNodeData): node is CanvasImageNodeWithReference {
+    return hasCanvasImage(node) && !node.metadata.localUploadState;
 }
 
 export function canOpenNodeGenerationDialog(node: CanvasNodeData) {
-    return (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video) && Boolean(node.metadata?.content);
+    return hasCanvasImage(node) || (node.type === CanvasNodeType.Video && Boolean(node.metadata?.content));
 }

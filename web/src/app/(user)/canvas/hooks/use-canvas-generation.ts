@@ -1,5 +1,7 @@
 "use client";
 
+import { hasCanvasImage } from "../components/canvas-node-actions";
+
 import { useRef, useState } from "react";
 
 import type { AiConfig } from "@/lib/ai-config";
@@ -307,7 +309,7 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
                 const count = getGenerationCount(generationConfig.count);
                 const isConfigNode = sourceNode?.type === CanvasNodeType.Config;
                 const isImageNode = sourceNode?.type === CanvasNodeType.Image;
-                const isEmptyImageNode = isImageNode && !sourceNode?.metadata?.content;
+                const isEmptyImageNode = isImageNode && !hasCanvasImage(sourceNode);
                 const generationMetadata = buildImageGenerationMetadata(referenceImages.length ? "edit" : "generation", generationConfig, count, referenceImages);
                 const parentConfig = NODE_DEFAULT_SIZE[isConfigNode ? CanvasNodeType.Config : isImageNode ? CanvasNodeType.Image : CanvasNodeType.Text];
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];

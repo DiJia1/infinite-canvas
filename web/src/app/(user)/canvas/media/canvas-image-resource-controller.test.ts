@@ -167,3 +167,26 @@ test("promotes back to the original after a rapid thumbnail/original reversal", 
     assert.equal(controller.get("node-1")?.variant, "original");
     assert.equal(originalCalls, 2);
 });
+
+test("failed image loads expose an error without an automatic retry loop", async () => {
+    let changed!: () => void;
+    const failed = new Promise<void>((resolve) => { changed = resolve; });
+    let calls = 0;
+    const controller = createCanvasImageResourceController({
+        queue: createCanvasMediaLoadQueue({ concurrency: 1 }),
+        releaseObjectURL: () => undefined,
+        onChange: () => changed(),
+    });
+    const loaders = {
+        thumbnail: async () => { calls++; throw new Error("image unavailable"); },
+        original: async () => image("original"),
+    };
+    controller.reconcile([request("thumbnail", loaders)]);
+    await failed;
+    assert.equal(controller.errors().get("node-1"), "image unavailable");
+    controller.reconcile([request("thumbnail", loaders)]);
+    assert.equal(calls, 1);
+    controller.reconcile([]);
+    assert.equal(controller.errors().size, 0);
+    controller.dispose();
+});

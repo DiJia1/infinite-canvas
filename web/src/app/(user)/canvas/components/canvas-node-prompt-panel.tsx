@@ -1,5 +1,7 @@
 "use client";
 
+import { hasCanvasImage } from "./canvas-node-actions";
+
 import { useEffect, useState } from "react";
 import { ArrowUp, LoaderCircle } from "lucide-react";
 import { Button } from "antd";
@@ -30,7 +32,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const mode = defaultMode(node.type);
     const config = buildGenerationConfig(globalConfig, node, defaultConfig);
     const hasTextContent = node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim());
-    const hasImageContent = node.type === CanvasNodeType.Image && Boolean(node.metadata?.content);
+    const hasImageContent = hasCanvasImage(node);
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const shouldPersistPrompt = node.type === CanvasNodeType.Image || !isEditingExistingContent;
     const [prompt, setPrompt] = useState(shouldPersistPrompt ? node.metadata?.prompt || "" : "");

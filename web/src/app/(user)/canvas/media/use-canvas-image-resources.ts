@@ -110,5 +110,5 @@ export function useCanvasImageResources({ targets, scale, resolveAccess }: { tar
     const resources = useMemo(() => controller.snapshot(), [controller, version]);
     const acknowledgeRendered = useCallback((nodeId: string, storageKey: string) => controller.acknowledgeRendered(nodeId, storageKey), [controller]);
 
-    return { resources, acknowledgeRendered };
+    return { resources, errors: controller.errors(), acknowledgeRendered };
 }

@@ -850,11 +850,11 @@ function InfiniteCanvasPage() {
     const previewNode = previewNodeId ? nodeById.get(previewNodeId) || null : null;
     const pinnedImageNodeIds = useMemo(() => {
         const ids = new Set(selectedNodeIds);
-        [dialogNodeId, maskNodeId, cropNodeId, angleNodeId, previewNodeId].forEach((id) => {
+        [toolbarNodeId, dialogNodeId, maskNodeId, cropNodeId, angleNodeId, previewNodeId].forEach((id) => {
             if (id) ids.add(id);
         });
         return ids;
-    }, [angleNodeId, cropNodeId, dialogNodeId, maskNodeId, previewNodeId, selectedNodeIds]);
+    }, [angleNodeId, cropNodeId, dialogNodeId, maskNodeId, previewNodeId, selectedNodeIds, toolbarNodeId]);
     const canvasMediaTargets = useMemo(
         () => buildCanvasMediaTargets({ onScreenNodes, prefetchNodes: mediaPrefetchNodes, pinnedNodes: nodes.filter((node) => pinnedImageNodeIds.has(node.id)) }),
         [mediaPrefetchNodes, nodes, onScreenNodes, pinnedImageNodeIds],
@@ -864,7 +864,7 @@ function InfiniteCanvasPage() {
         if (!mediaId) throw new Error("图片缺少媒体标识");
         return node.metadata?.publicImageId ? fetchPublicImageAccess(node.metadata.publicImageId) : getRemoteImageAccess(mediaId);
     }, []);
-    const { resources: canvasImageResources, acknowledgeRendered: acknowledgeCanvasImageRendered } = useCanvasImageResources({
+    const { resources: canvasImageResources, errors: canvasImageErrors, acknowledgeRendered: acknowledgeCanvasImageRendered } = useCanvasImageResources({
         targets: canvasMediaTargets,
         scale: viewport.k,
         resolveAccess: resolveCanvasMediaAccess,
@@ -1609,6 +1609,7 @@ function InfiniteCanvasPage() {
             let content = node.metadata.content || "";
             if (node.metadata.storageKey) content = (await resolveStoredImageReference(node.metadata.storageKey)) || content;
             if (!content && node.metadata.mediaId) content = (await loadMediaImage(node.metadata.mediaId, () => resolveRemoteImage(node.metadata!.mediaId!))).url;
+            if (!content && node.metadata.publicImageId) content = (await fetchPublicImageAccess(node.metadata.publicImageId)).url;
             if (!content) throw new Error("图片尚未加载完成");
             saveAs(content, `canvas-image-${node.id}.${imageExtension(node.metadata.mimeType || content)}`);
         },
@@ -1628,11 +1629,12 @@ function InfiniteCanvasPage() {
     const saveNodeAsset = useCallback(
         async (node: CanvasNodeData) => {
             if (!canSaveNodeAsAsset(node)) return message.error("没有可保存的图片");
-            const dataUrl = node.metadata.storageKey ? "" : node.metadata.content;
+            const content = canvasImageSource(node) || "";
+            const dataUrl = node.metadata.storageKey || node.metadata.mediaId || node.metadata.publicImageId ? "" : content;
             addAsset({
                 kind: "image",
                 title: node.metadata?.prompt?.slice(0, 24) || "画布图片",
-                coverUrl: node.metadata.content,
+                coverUrl: content,
                 tags: [],
                 source: "Canvas",
                 data: {
@@ -1654,7 +1656,7 @@ function InfiniteCanvasPage() {
             });
             message.success("已加入我的素材");
         },
-        [addAsset, message],
+        [addAsset, message, canvasImageSource],
     );
 
     const cropImageNode = useCallback(async (node: CanvasNodeData, crop: CanvasImageCropRect, source: string) => {
@@ -2137,6 +2139,8 @@ function InfiniteCanvasPage() {
                     <CanvasNodeHoverToolbar
                         node={isNodeDragging || nodeImageSettingsOpen ? null : toolbarNode}
                         viewport={viewport}
+                        imageReady={Boolean(toolbarNode && canvasImageSource(toolbarNode) && (!toolbarNode.metadata?.mediaId || canvasImageResources.get(toolbarNode.id)?.variant === "original"))}
+                        imageError={toolbarNode ? canvasImageErrors.get(toolbarNode.id) : undefined}
                         onKeep={keepNodeToolbar}
                         onLeave={hideNodeToolbar}
                         onEditText={openTextEditor}
@@ -2145,8 +2149,8 @@ function InfiniteCanvasPage() {
                         onToggleDialog={(node) => setDialogNodeId((current) => (current === node.id ? null : node.id))}
                         onGenerateImage={generateImageFromTextNode}
                         onUpload={(node) => handleUploadRequest(node.id)}
-                        onDownload={downloadNodeImage}
-                        onSaveAsset={(node) => void saveNodeAsset(node)}
+                        onDownload={(node) => void downloadNodeImage(node).catch((error) => message.error(error instanceof Error ? error.message : "图片下载失败"))}
+                        onSaveAsset={(node) => void saveNodeAsset(node).catch((error) => message.error(error instanceof Error ? error.message : "保存素材失败"))}
                         onCrop={(node) => setCropNodeId(node.id)}
                         onAngle={(node) => setAngleNodeId(node.id)}
                         onViewImage={(node) => setPreviewNodeId(node.id)}

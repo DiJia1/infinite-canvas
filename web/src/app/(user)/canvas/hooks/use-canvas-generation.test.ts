@@ -465,3 +465,12 @@ test("text-to-image creates and opens an image config node instead of calling te
         [{ fromNodeId: "source", toNodeId: configNode.id }],
     );
 });
+
+test("editing a media-only image preserves the source and creates a result node", async () => {
+    const source = node("remote-source", CanvasNodeType.Image, { mediaId: "original-media" });
+    const { controller, nodesRef } = setup([source]);
+    await controller.generateNode(source.id, "image", "change the style");
+    assert.equal(nodesRef.current.find((item) => item.id === source.id)?.metadata?.mediaId, "original-media");
+    assert.equal(nodesRef.current.find((item) => item.id === source.id)?.metadata?.content, undefined);
+    assert.ok(nodesRef.current.some((item) => item.id !== source.id && item.type === CanvasNodeType.Image));
+});

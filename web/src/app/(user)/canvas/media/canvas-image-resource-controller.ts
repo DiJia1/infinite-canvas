@@ -21,6 +21,7 @@ type ResourceEntry = {
     generation: number;
     current?: CanvasImageResource;
     retained: CanvasImageResource[];
+    error?: string;
     pending?: { variant: CanvasImageResourceRequest["variant"]; generation: number; lease: MediaLoadLease<UploadedImage> };
 };
 
@@ -35,6 +36,7 @@ export type CanvasImageResourceController = {
     reconcile: (requests: CanvasImageResourceRequest[]) => void;
     get: (nodeId: string) => CanvasImageResource | undefined;
     snapshot: () => ReadonlyMap<string, CanvasImageResource>;
+    errors: () => ReadonlyMap<string, string>;
     acknowledgeRendered: (nodeId: string, storageKey: string) => void;
     dispose: () => void;
 };
@@ -94,9 +96,11 @@ export function createCanvasImageResourceController({ queue, releaseObjectURL, d
                 const originalStorageKey = imageStorageKeyForMedia(request.mediaId);
                 if (request.variant === "thumbnail" && request.releaseOriginalAfterThumbnail && image.storageKey !== originalStorageKey) releaseIfUnused(originalStorageKey);
             })
-            .catch(() => {
+            .catch((error) => {
                 if (entries.get(request.nodeId) !== entry || entry.generation !== generation || entry.pending?.generation !== generation) return;
                 entry.pending = undefined;
+                entry.error = error instanceof Error ? error.message : "图片加载失败";
+                notify();
             });
     };
 
@@ -118,7 +122,10 @@ export function createCanvasImageResourceController({ queue, releaseObjectURL, d
                 startLoad(created, request);
                 return;
             }
+            const failedSameRequest = entry.error && entry.request.mediaId === request.mediaId && entry.request.variant === request.variant;
             entry.request = request;
+            if (failedSameRequest) return;
+            entry.error = undefined;
             if (entry.current?.variant === request.variant && !entry.pending) return;
             if (entry.pending?.variant === request.variant) return;
             startLoad(entry, request);
@@ -128,6 +135,7 @@ export function createCanvasImageResourceController({ queue, releaseObjectURL, d
     return {
         reconcile,
         get: (nodeId) => entries.get(nodeId)?.current,
+        errors: () => new Map([...entries].flatMap(([id, entry]) => entry.error ? [[id, entry.error] as const] : [])),
         snapshot: () => new Map([...entries].flatMap(([nodeId, entry]) => (entry.current ? [[nodeId, entry.current] as const] : []))),
         acknowledgeRendered: (nodeId, storageKey) => {
             const entry = entries.get(nodeId);

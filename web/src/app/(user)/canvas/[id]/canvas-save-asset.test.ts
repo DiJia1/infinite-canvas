@@ -33,3 +33,14 @@ test("text nodes cannot enter an unavailable text-model generation path", () => 
     assert.equal(canOpenNodeGenerationDialog(node(CanvasNodeType.Text, "note")), false);
     assert.equal(canOpenNodeGenerationDialog(node(CanvasNodeType.Image, "blob:image")), true);
 });
+
+test("stable image references remain editable and saveable without a transient URL", () => {
+    for (const key of ["mediaId", "publicImageId", "storageKey"] as const) {
+        const image = node(CanvasNodeType.Image);
+        image.metadata![key] = "reference-1";
+        assert.equal(canSaveNodeAsAsset(image), true, key);
+        assert.equal(canOpenNodeGenerationDialog(image), true, key);
+        image.metadata!.localUploadState = "failed";
+        assert.equal(canSaveNodeAsAsset(image), false);
+    }
+});

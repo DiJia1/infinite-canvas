@@ -1,5 +1,7 @@
 "use client";
 
+import { hasCanvasImage } from "./canvas-node-actions";
+
 import { type ReactNode } from "react";
 import { Tooltip } from "antd";
 import { Brush, Camera, Download, FolderPlus, Image as ImageIcon, Maximize2, MessageSquare, Minus, Pencil, Plus, RefreshCw, Scissors, Trash2, Upload, Video } from "lucide-react";
@@ -10,6 +12,8 @@ import { canOpenNodeGenerationDialog, canSaveNodeAsAsset } from "./canvas-node-a
 type CanvasNodeHoverToolbarProps = {
     node: CanvasNodeData | null;
     viewport: ViewportTransform;
+    imageReady: boolean;
+    imageError?: string;
     onKeep: (nodeId: string) => void;
     onLeave: () => void;
     onEditText: (node: CanvasNodeData) => void;
@@ -31,6 +35,8 @@ type CanvasNodeHoverToolbarProps = {
 export function CanvasNodeHoverToolbar({
     node,
     viewport,
+    imageReady,
+    imageError,
     onKeep,
     onLeave,
     onEditText,
@@ -55,7 +61,7 @@ export function CanvasNodeHoverToolbar({
     const top = viewport.y + node.position.y * viewport.k - 14;
     const isImage = node.type === CanvasNodeType.Image;
     const isVideo = node.type === CanvasNodeType.Video;
-    const hasImage = isImage && Boolean(node.metadata?.content);
+    const hasImage = hasCanvasImage(node);
     const hasVideo = isVideo && Boolean(node.metadata?.content);
     const isText = node.type === CanvasNodeType.Text;
     const canOpenDialog = canOpenNodeGenerationDialog(node);
@@ -86,23 +92,23 @@ export function CanvasNodeHoverToolbar({
             {isText ? <ToolbarAction title="增大字号" label="放大" icon={<Plus className="size-4" />} onClick={() => onIncreaseFont(node)} /> : null}
             {isImage ? <ToolbarAction title={hasImage ? "替换图片" : "上传图片"} label={hasImage ? "替换图片" : "上传图片"} icon={<Upload className="size-4" />} onClick={() => onUpload(node)} /> : null}
             {isVideo ? <ToolbarAction title={hasVideo ? "替换视频" : "上传视频"} label={hasVideo ? "替换视频" : "上传视频"} icon={<Video className="size-4" />} onClick={() => onUpload(node)} /> : null}
-            {hasImage && supportsMask ? <ToolbarAction title="编辑遮罩" label="遮罩" icon={<Brush className="size-4" />} onClick={() => onMask(node)} /> : null}
-            {hasImage ? <ToolbarAction title="裁剪并生成新节点" label="裁剪" icon={<Scissors className="size-4" />} onClick={() => onCrop(node)} /> : null}
-            {hasImage ? <ToolbarAction title="生成角度" label="多角度" icon={<Camera className="size-4" />} onClick={() => onAngle(node)} /> : null}
-            {hasImage ? <ToolbarAction title="查看图片详情" label="查看大图" icon={<Maximize2 className="size-4" />} onClick={() => onViewImage(node)} /> : null}
+            {hasImage && supportsMask ? <ToolbarAction disabled={!imageReady} hint={!imageReady ? (imageError ? "图片加载失败，请重新打开画布" : "图片加载中") : undefined} title="编辑遮罩" label="遮罩" icon={<Brush className="size-4" />} onClick={() => onMask(node)} /> : null}
+            {hasImage ? <ToolbarAction disabled={!imageReady} hint={!imageReady ? (imageError ? "图片加载失败，请重新打开画布" : "图片加载中") : undefined} title="裁剪并生成新节点" label="裁剪" icon={<Scissors className="size-4" />} onClick={() => onCrop(node)} /> : null}
+            {hasImage ? <ToolbarAction disabled={!imageReady} hint={!imageReady ? (imageError ? "图片加载失败，请重新打开画布" : "图片加载中") : undefined} title="生成角度" label="多角度" icon={<Camera className="size-4" />} onClick={() => onAngle(node)} /> : null}
+            {hasImage ? <ToolbarAction disabled={!imageReady} hint={!imageReady ? (imageError ? "图片加载失败，请重新打开画布" : "图片加载中") : undefined} title="查看图片详情" label="查看大图" icon={<Maximize2 className="size-4" />} onClick={() => onViewImage(node)} /> : null}
         </div>
     );
 }
 
 
-function ToolbarAction({ title, label, icon, onClick, hint, active = false }: { title: string; label: string; icon: ReactNode; onClick?: () => void; hint?: string; active?: boolean }) {
+function ToolbarAction({ title, label, icon, onClick, hint, active = false, disabled = false }: { title: string; label: string; icon: ReactNode; onClick?: () => void; hint?: string; active?: boolean; disabled?: boolean }) {
     return (
-        <Tooltip title={title} placement="top" mouseEnterDelay={0.2}>
-            <button type="button" className="group relative flex h-12 items-center whitespace-nowrap px-1.5" onClick={onClick} aria-label={title}>
+        <Tooltip title={hint || title} placement="top" mouseEnterDelay={0.2}>
+            <button type="button" disabled={disabled} className="disabled:opacity-50 group relative flex h-12 items-center whitespace-nowrap px-1.5" onClick={onClick} aria-label={title} aria-description={hint}>
                 <span className={`flex h-9 items-center gap-2 rounded-lg px-2.5 transition group-hover:bg-[#f0f0f1] ${active ? "bg-[#eeeeef]" : ""}`}>
                     {icon}
                     <span>{label}</span>
-                    {hint ? <span className="text-[#a3a3a3]">{hint}</span> : null}
+                    {hint && !disabled ? <span className="text-[#a3a3a3]">{hint}</span> : null}
                 </span>
             </button>
         </Tooltip>
