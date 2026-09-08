@@ -140,7 +140,7 @@ func TestMediaLifecycleExpiryCancellationAndCanvasDeletion(t *testing.T) {
 	if _, err := SaveMedia(model.Media{ID: "image", OwnerUID: "owner"}); err != nil {
 		t.Fatal(err)
 	}
-	expiry := time.Now().Add(time.Minute)
+	expiry := time.Date(2026, 9, 8, 10, 0, 0, 123456789, time.UTC)
 	for _, e := range []*time.Time{&expiry, &expiry, nil, nil} {
 		if _, err := SetPrivateMediaExpiry("image", "owner", e); err != nil {
 			t.Fatal(err)

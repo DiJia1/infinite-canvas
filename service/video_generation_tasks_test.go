@@ -81,7 +81,7 @@ func (p workerVideoProvider) GetVideoContent(context.Context, string) (ai.VideoC
 }
 func seedWorkerVideo(t *testing.T, status string, p workerVideoProvider) (model.VideoGenerationTask, time.Time) {
 	t.Helper()
-	current := time.Now().UTC()
+	current := time.Now().UTC().Truncate(time.Microsecond)
 	id := newID("video-test")
 	typ := id + "-provider"
 	if err := ai.Register(ai.ProviderType{ID: typ, Name: typ, Capabilities: []ai.Capability{ai.CapabilityVideoGenerate}, New: func(json.RawMessage) (ai.Provider, error) { return p, nil }}); err != nil {

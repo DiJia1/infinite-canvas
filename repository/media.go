@@ -82,6 +82,11 @@ func ListPrivateMedia(ownerUID string) ([]model.Media, error) {
 }
 
 func SetPrivateMediaExpiry(id, ownerUID string, expiresAt *time.Time) (bool, error) {
+	// Match PostgreSQL/pgx timestamp precision before comparing with a stored value.
+	if expiresAt != nil {
+		normalized := expiresAt.UTC().Truncate(time.Microsecond)
+		expiresAt = &normalized
+	}
 	db, err := DB()
 	if err != nil {
 		return false, err
