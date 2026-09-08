@@ -58,19 +58,36 @@ test("downloads resolve remote and public references and propagate access failur
     assert.equal(saved.length, 2);
 });
 
-test("video download resolves stable media without document content", async () => {
-    const saved: string[] = [];
+test("video download resolves stable media, prevents duplicate clicks and releases failed requests", async () => {
+    const requests: unknown[][] = [];
+    const messages: string[] = [];
+    const videoDownloads = { current: new Set<string>() };
+    let finish: (() => void) | undefined;
     const download = callback("downloadNodeImage", {
         CanvasNodeType,
-        getVideoMediaAccess: async (id: string) => {
+        videoDownloads,
+        message: { success: (text: string) => messages.push(text) },
+        downloadVideo: async (id: string, content: unknown, filename: string) => {
+            requests.push([id, content, filename]);
             if (id === "missing") throw new Error("视频不可访问");
-            return { url: "https://oss.example/video" };
+            await new Promise<void>((resolve) => { finish = resolve; });
         },
-        saveAs: (url: string) => saved.push(url),
     });
     const node = { id: "video", type: CanvasNodeType.Video, metadata: { mediaId: "video-media" } };
+    const pending = download(node);
     await download(node);
-    assert.deepEqual(saved, ["https://oss.example/video"]);
+    assert.deepEqual(requests, [["video-media", undefined, "canvas-video-video.mp4"]]);
+    assert.equal(messages.length, 0);
+    assert.ok(finish);
+    finish();
+    await pending;
+    assert.deepEqual(messages, ["已发起下载"]);
+    assert.equal(videoDownloads.current.size, 0);
     assert.equal("content" in node.metadata, false);
-    await assert.rejects(download({ ...node, metadata: { mediaId: "missing" } }), /不可访问/);
+    for (let attempt = 0; attempt < 2; attempt++) {
+        await assert.rejects(download({ ...node, metadata: { mediaId: "missing" } }), /不可访问/);
+        assert.equal(videoDownloads.current.size, 0);
+    }
+    assert.equal(requests.length, 3);
+    assert.equal(messages.length, 1);
 });
