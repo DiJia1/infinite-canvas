@@ -134,3 +134,76 @@ func TestValidateSettingsAllowsCustomResolutionPricesAndRejectsUnsafeRules(t *te
 		}
 	}
 }
+
+func TestVideoModelSettingsRequirePricesAndRatios(t *testing.T) {
+	info := ai.ProviderType{ID: "video-settings-test", Name: "Video", Capabilities: []ai.Capability{ai.CapabilityVideoGenerate}}
+	_ = ai.Register(info)
+	p := model.AIProvider{ID: "video", Name: "Video", Type: info.ID, Enabled: true, Config: json.RawMessage(`{}`)}
+	if err := validateSettings(model.AISettings{Providers: []model.AIProvider{p}, VideoProviderID: p.ID}); err != nil {
+		t.Fatal("incomplete settings should remain saveable", err)
+	}
+	if providerAvailable(model.AISettings{Providers: []model.AIProvider{p}}, p.ID, ai.CapabilityVideoGenerate) {
+		t.Fatal("incomplete model available")
+	}
+	p.VideoPrices = []model.ImageResolutionPrice{{Resolution: "720p", Amount: decimal.RequireFromString("0.25")}}
+	p.AspectRatios = []string{"16:9", "9:16"}
+	if e := validateProviderVideoSettings(p, info); e != nil {
+		t.Fatal(e)
+	}
+	choices := publicAIModelChoices(model.AISettings{Providers: []model.AIProvider{p}}, ai.CapabilityVideoGenerate)
+	if len(choices) != 1 || choices[0].VideoRequestSchema == nil {
+		t.Fatal(choices)
+	}
+	s := choices[0].VideoRequestSchema
+	if s.MinDuration != 4 || s.MaxDuration != 15 || s.MaxReferenceImages != 9 || s.MaxReferenceVideos != 3 || s.Resolutions[0].Price != "0.25" || s.AspectRatios[0] != "16:9" {
+		t.Fatalf("%+v", s)
+	}
+	p.AspectRatios = []string{"16:9", "16:9"}
+	if validateProviderVideoSettings(p, info) == nil {
+		t.Fatal("duplicate ratio accepted")
+	}
+	p.AspectRatios = []string{"0:9"}
+	if validateProviderVideoSettings(p, info) == nil {
+		t.Fatal("invalid ratio accepted")
+	}
+	p.AspectRatios = []string{"16:9"}
+	p.VideoPrices[0].Amount = decimal.NewFromInt(-1)
+	if validateProviderVideoSettings(p, info) == nil {
+		t.Fatal("negative price accepted")
+	}
+}
+func TestConfiguredImageAspectRatiosNoFallbackAndClone(t *testing.T) {
+	schema := ai.ImageRequestSchema{Fields: []ai.ImageRequestField{{Key: "size", Options: []ai.ImageRequestFieldOption{{Value: "1:1"}}, Default: json.RawMessage(`"1:1"`)}}}
+	legacy := configuredImageRequestSchema(model.AIProvider{}, schema)
+	if len(legacy.Fields[0].Options) != 0 || legacy.Fields[0].Default != nil {
+		t.Fatal(legacy)
+	}
+	configured := configuredImageRequestSchema(model.AIProvider{AspectRatios: []string{"16:9"}}, schema)
+	if configured.Fields[0].Options[0].Value != "16:9" || schema.Fields[0].Options[0].Value != "1:1" {
+		t.Fatal("aspect ratio override mutated source")
+	}
+}
+
+func TestImageRatioConfigurationControlsAvailabilityAndSubmission(t *testing.T) {
+	const id = "explicit-ratio-test"
+	_ = ai.Register(ai.ProviderType{ID: id, Name: "Explicit ratios", Capabilities: []ai.Capability{ai.CapabilityImageGenerate}, ImageRequestSchema: &ai.ImageRequestSchema{Fields: []ai.ImageRequestField{{Key: "size"}}}})
+	p := model.AIProvider{ID: "model", Name: "Model", Type: id, Enabled: true, Config: json.RawMessage(`{}`), ImagePrices: []model.ImageResolutionPrice{{Resolution: "1K"}}}
+	settings := model.AISettings{Providers: []model.AIProvider{p}, ImageProviderID: p.ID}
+	if err := validateSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	if len(publicAIModelChoices(settings, ai.CapabilityImageGenerate)) != 0 {
+		t.Fatal("unconfigured ratio exposed")
+	}
+	if _, err := configuredImageTaskProvider(settings, "generate", p.ID); err == nil {
+		t.Fatal("unconfigured ratio accepted")
+	}
+	p.AspectRatios = []string{"5:4"}
+	settings.Providers[0] = p
+	if len(publicAIModelChoices(settings, ai.CapabilityImageGenerate)) != 1 {
+		t.Fatal("configured provider unavailable")
+	}
+	if _, err := configuredImageTaskProvider(settings, "generate", p.ID); err != nil {
+		t.Fatal(err)
+	}
+}

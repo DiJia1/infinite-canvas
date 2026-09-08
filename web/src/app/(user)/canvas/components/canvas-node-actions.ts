@@ -14,5 +14,5 @@ export function canSaveNodeAsAsset(node: CanvasNodeData): node is CanvasImageNod
 }
 
 export function canOpenNodeGenerationDialog(node: CanvasNodeData) {
-    return hasCanvasImage(node) || (node.type === CanvasNodeType.Video && Boolean(node.metadata?.content));
+    return hasCanvasImage(node) || (node.type === CanvasNodeType.Video && Boolean(node.metadata?.content || node.metadata?.mediaId || node.metadata?.storageKey));
 }

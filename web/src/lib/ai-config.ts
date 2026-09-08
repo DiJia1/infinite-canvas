@@ -1,6 +1,8 @@
 export type AiConfig = {
     videoSeconds: string;
-    vquality: string;
+    videoSize?: string;
+    generateAudio?: string;
+    vquality: string | null;
     quality: string;
     size: string;
     resolution: string;
@@ -15,8 +17,10 @@ export type AiConfig = {
 };
 
 export const defaultAiConfig: AiConfig = {
-    videoSeconds: "6",
-    vquality: "720",
+    videoSeconds: "5",
+    videoSize: "",
+    generateAudio: "false",
+    vquality: null,
     quality: "auto",
     size: "1:1",
     resolution: "",
@@ -31,8 +35,10 @@ export function normalizePersistedAiConfig(input: unknown): AiConfig {
     const stringValue = (key: keyof AiConfig, fallback: string) => (typeof persisted[key] === "string" ? persisted[key] : fallback);
     const resolution = stringValue("resolution", defaultAiConfig.resolution);
     const normalized: AiConfig = {
+        videoSize: stringValue("videoSize", ""),
+        generateAudio: stringValue("generateAudio", "false"),
         videoSeconds: stringValue("videoSeconds", defaultAiConfig.videoSeconds),
-        vquality: stringValue("vquality", defaultAiConfig.vquality),
+        vquality: typeof persisted.vquality === "string" ? persisted.vquality : null,
         quality: stringValue("quality", defaultAiConfig.quality),
         size: stringValue("size", defaultAiConfig.size),
         resolution,

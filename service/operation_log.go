@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"strings"
 	"time"
@@ -9,8 +10,6 @@ import (
 	"github.com/basketikun/infinite-canvas/model"
 	"github.com/basketikun/infinite-canvas/repository"
 )
-
-const auditRetention = 7 * 24 * time.Hour
 
 type OperationLogInput struct {
 	Action         string
@@ -64,7 +63,29 @@ func ListOperationLogs(query model.OperationLogQuery) (model.OperationLogList, e
 	if err != nil {
 		return model.OperationLogList{}, err
 	}
+	operationIDs := make([]string, 0)
+	for _, item := range items {
+		if item.Action == "video_generate" {
+			operationIDs = append(operationIDs, item.ID)
+		}
+	}
+	tasks, err := repository.ListVideoTasksForOperations(operationIDs)
+	if err != nil {
+		return model.OperationLogList{}, err
+	}
+	byOperation := make(map[string]model.VideoGenerationTask, len(tasks))
+	for _, task := range tasks {
+		byOperation[task.OperationLogID] = task
+	}
 	for index := range items {
+		if items[index].Action == "video_generate" {
+			// Replace the historical raw request with the explicit safe DTO.
+			items[index].RequestSummary = ""
+			if task, ok := byOperation[items[index].ID]; ok {
+				items[index].Video = videoOperationDetails(task)
+				items[index].ProviderTaskID = task.ProviderTaskID
+			}
+		}
 		if items[index].ActorRoles == nil {
 			items[index].ActorRoles = []string{}
 		}
@@ -76,7 +97,7 @@ func ListOperationLogs(query model.OperationLogQuery) (model.OperationLogList, e
 }
 
 func CleanupExpiredOperationLogs(now time.Time) error {
-	return repository.DeleteOperationLogsBefore(now.UTC().Add(-auditRetention))
+	return repository.DeleteExpiredOperationLogs(now.UTC())
 }
 
 func StartOperationLogRetention(ctx context.Context) func() {
@@ -101,4 +122,16 @@ func StartOperationLogRetention(ctx context.Context) func() {
 		}
 	}()
 	return func() { close(stop) }
+}
+
+func videoOperationDetails(task model.VideoGenerationTask) *model.VideoOperationDetails {
+	var request struct {
+		Seconds       int    `json:"seconds"`
+		Size          string `json:"size"`
+		Resolution    string `json:"resolution"`
+		GenerateAudio bool   `json:"generateAudio"`
+	}
+	// Corrupt historical snapshots expose no raw request data.
+	_ = json.Unmarshal([]byte(task.RequestJSON), &request)
+	return &model.VideoOperationDetails{TaskID: task.ID, Status: task.Status, ProviderID: task.ProviderID, ProviderName: task.ProviderName, ProviderTaskID: task.ProviderTaskID, Seconds: request.Seconds, Size: request.Size, Resolution: request.Resolution, GenerateAudio: request.GenerateAudio, Amount: task.Amount}
 }

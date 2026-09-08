@@ -231,3 +231,17 @@
     animation: none;
     mix-blend-mode: normal;
 }
+
+.canvas-config-mode .ant-segmented-group {
+    display: flex;
+}
+
+.canvas-config-mode .ant-segmented-item {
+    flex: 1 1 0;
+}
+
+.canvas-config-mode .ant-segmented-item-label {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}

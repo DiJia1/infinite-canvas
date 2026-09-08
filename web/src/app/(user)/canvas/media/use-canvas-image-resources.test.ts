@@ -34,3 +34,15 @@ test("keeps prefetches thumbnail-only while screen and pinned images retain thei
         ],
     );
 });
+
+test("preview keeps offscreen images targeted without forcing original quality and releases them on close", () => {
+    const node = imageNode("preview");
+    const targets = buildCanvasMediaTargets({ onScreenNodes: [], prefetchNodes: [], pinnedNodes: [], previewNodes: [node] });
+    assert.equal(targets.length, 1);
+    assert.equal(targets[0].preview, true);
+    assert.equal(targets[0].pinned, false);
+    const shared = buildCanvasMediaTargets({ onScreenNodes: [node], prefetchNodes: [], pinnedNodes: [], previewNodes: [node] });
+    assert.equal(shared.length, 1);
+    assert.equal(shared[0].visible, true);
+    assert.deepEqual(buildCanvasMediaTargets({ onScreenNodes: [], prefetchNodes: [], pinnedNodes: [] }), []);
+});

@@ -32,7 +32,10 @@ export function normalizeImageRequestOptions(schema: ImageRequestSchema | undefi
     const options: ImageRequestOptions = {};
     for (const field of schema.fields) {
         const value = input?.[field.key];
-        if (isValidOption(field, value)) {
+        // Keep an explicit ratio visible so model changes require a deliberate selection.
+        if (field.key === "size" && typeof value === "string") {
+            options[field.key] = value;
+        } else if (isValidOption(field, value)) {
             options[field.key] = value;
         } else if (isValidOption(field, field.default)) {
             options[field.key] = field.default;

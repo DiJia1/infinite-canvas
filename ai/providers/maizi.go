@@ -105,7 +105,11 @@ func (provider *maiziProvider) NormalizeImageTaskRequest(request ai.ImageTaskReq
 	setImageRequestOption(options, "resolution", request.Request.Resolution)
 	setImageRequestOption(options, "outputFormat", request.Request.OutputFormat)
 	setImageRequestOption(options, "background", request.Request.Background)
-	normalized, err := ai.NormalizeImageRequestOptions(maiziImageRequestSchema, options)
+	schema := maiziImageRequestSchema
+	if request.RequestSchema != nil {
+		schema = *request.RequestSchema
+	}
+	normalized, err := ai.NormalizeImageRequestOptions(schema, options)
 	if err != nil {
 		return ai.ImageTaskRequest{}, maiziError{message: err.Error()}
 	}

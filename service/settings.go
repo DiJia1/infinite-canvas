@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -28,6 +29,7 @@ type AIStatus struct {
 // AIModelChoice is safe to return to ordinary users. It deliberately omits
 // the provider configuration, including API keys and other private values.
 type AIModelChoice struct {
+	VideoRequestSchema *ai.VideoRequestSchema `json:"videoRequestSchema,omitempty"`
 	ID                 string                 `json:"id"`
 	Name               string                 `json:"name"`
 	Type               string                 `json:"type"`
@@ -65,13 +67,19 @@ func publicAIModelChoices(settings model.AISettings, capability ai.Capability) [
 		if !ok || !typeInfo.Supports(capability) {
 			continue
 		}
-		if (capability == ai.CapabilityImageGenerate || capability == ai.CapabilityImageEdit) && len(provider.ImagePrices) == 0 {
+		if (capability == ai.CapabilityImageGenerate || capability == ai.CapabilityImageEdit) && (len(provider.ImagePrices) == 0 || (requiresImageAspectRatios(typeInfo) && len(provider.AspectRatios) == 0)) {
+			continue
+		}
+		if capability == ai.CapabilityVideoGenerate && (len(provider.VideoPrices) == 0 || len(provider.AspectRatios) == 0) {
 			continue
 		}
 		choice := AIModelChoice{ID: provider.ID, Name: provider.Name, Type: typeInfo.ID}
 		if capability == ai.CapabilityImageGenerate && typeInfo.ImageRequestSchema != nil {
 			schema := configuredImageRequestSchema(provider, *typeInfo.ImageRequestSchema)
 			choice.ImageRequestSchema = &schema
+		}
+		if capability == ai.CapabilityVideoGenerate {
+			choice.VideoRequestSchema = configuredVideoRequestSchema(provider)
 		}
 		choices = append(choices, choice)
 	}
@@ -80,7 +88,7 @@ func publicAIModelChoices(settings model.AISettings, capability ai.Capability) [
 
 func activeImageProviderSchema(settings model.AISettings) (string, *ai.ImageRequestSchema) {
 	provider, ok := findProvider(settings, settings.ImageProviderID)
-	if !ok || !provider.Enabled {
+	if !ok || !providerAvailable(settings, provider.ID, ai.CapabilityImageGenerate) {
 		return "", nil
 	}
 	typeInfo, ok := ai.Type(provider.Type)
@@ -120,6 +128,12 @@ func normalizeSettings(settings model.Settings) model.Settings {
 			provider.Config = json.RawMessage("{}")
 		}
 		normalizeProviderImagePrices(provider)
+		for j := range provider.VideoPrices {
+			provider.VideoPrices[j].Resolution = strings.TrimSpace(provider.VideoPrices[j].Resolution)
+		}
+		for j := range provider.AspectRatios {
+			provider.AspectRatios[j] = strings.TrimSpace(provider.AspectRatios[j])
+		}
 	}
 	return settings
 }
@@ -144,16 +158,19 @@ func validateSettings(settings model.AISettings) error {
 		if err := validateProviderImagePrices(provider); err != nil {
 			return err
 		}
+		if err := validateProviderVideoSettings(provider, typeInfo); err != nil {
+			return err
+		}
 		if typeInfo.New != nil {
 			if _, err := typeInfo.New(provider.Config); err != nil {
 				return err
 			}
 		}
 	}
-	if settings.ImageProviderID != "" && !providerAvailable(settings, settings.ImageProviderID, ai.CapabilityImageGenerate) {
+	if settings.ImageProviderID != "" && !providerHasCapability(settings, settings.ImageProviderID, ai.CapabilityImageGenerate) {
 		return errors.New("生图供应商不可用或不支持生图")
 	}
-	if settings.VideoProviderID != "" && !providerAvailable(settings, settings.VideoProviderID, ai.CapabilityVideoGenerate) {
+	if settings.VideoProviderID != "" && !providerHasCapability(settings, settings.VideoProviderID, ai.CapabilityVideoGenerate) {
 		return errors.New("生视频供应商不可用或不支持生视频")
 	}
 	return nil
@@ -209,6 +226,18 @@ func configuredImageRequestSchema(provider model.AIProvider, schema ai.ImageRequ
 	schema.Fields = append([]ai.ImageRequestField(nil), schema.Fields...)
 	for index := range schema.Fields {
 		field := &schema.Fields[index]
+		if field.Key == "size" {
+			field.Required = true
+			field.Type = ai.ImageRequestFieldSelect
+			field.Options = make([]ai.ImageRequestFieldOption, 0, len(provider.AspectRatios))
+			for _, ratio := range provider.AspectRatios {
+				field.Options = append(field.Options, ai.ImageRequestFieldOption{Value: ratio, Label: ratio})
+			}
+			field.Default = nil
+			if len(provider.AspectRatios) > 0 {
+				field.Default, _ = json.Marshal(provider.AspectRatios[0])
+			}
+		}
 		if field.Key != "resolution" {
 			continue
 		}
@@ -237,7 +266,10 @@ func providerAvailable(settings model.AISettings, id string, capability ai.Capab
 	if !ok || !typeInfo.Supports(capability) {
 		return false
 	}
-	return (capability != ai.CapabilityImageGenerate && capability != ai.CapabilityImageEdit) || len(provider.ImagePrices) > 0
+	if capability == ai.CapabilityVideoGenerate {
+		return len(provider.VideoPrices) > 0 && len(provider.AspectRatios) > 0
+	}
+	return (capability != ai.CapabilityImageGenerate && capability != ai.CapabilityImageEdit) || (len(provider.ImagePrices) > 0 && (!requiresImageAspectRatios(typeInfo) || len(provider.AspectRatios) > 0))
 }
 
 func resolveProviderForID(capability ai.Capability, requestedProviderID string) (ai.Provider, error) {
@@ -294,3 +326,75 @@ type safeMessageError struct{ message string }
 
 func (err safeMessageError) Error() string       { return err.message }
 func (err safeMessageError) SafeMessage() string { return err.message }
+
+func configuredVideoRequestSchema(provider model.AIProvider) *ai.VideoRequestSchema {
+	schema := &ai.VideoRequestSchema{AspectRatios: append([]string(nil), provider.AspectRatios...), MinDuration: 4, MaxDuration: 15, DefaultDuration: 5, MaxReferenceImages: 9, MaxReferenceVideos: 3, MaxReferenceVideoDuration: 15, Resolutions: []ai.ImageRequestFieldOption{}}
+	for _, price := range provider.VideoPrices {
+		schema.Resolutions = append(schema.Resolutions, ai.ImageRequestFieldOption{Value: price.Resolution, Label: price.Resolution, Price: price.Amount.String()})
+	}
+	return schema
+}
+
+var aspectRatioParameter = regexp.MustCompile(`^[1-9][0-9]{0,3}:[1-9][0-9]{0,3}$`)
+
+func validateProviderVideoSettings(provider model.AIProvider, info ai.ProviderType) error {
+	if len(provider.AspectRatios) > 0 && !info.Supports(ai.CapabilityVideoGenerate) {
+		supportsRatio := false
+		if info.ImageRequestSchema != nil {
+			for _, field := range info.ImageRequestSchema.Fields {
+				if field.Key == "size" {
+					supportsRatio = true
+				}
+			}
+		}
+		if !supportsRatio {
+			return errors.New("当前图片供应商不支持独立比例参数，请通过分辨率配置尺寸")
+		}
+	}
+	seenRatios := map[string]bool{}
+	for _, ratio := range provider.AspectRatios {
+		if !aspectRatioParameter.MatchString(ratio) && ratio != "auto" {
+			return errors.New("比例必须为正整数比例（例如 16:9）或 auto")
+		}
+		if seenRatios[ratio] {
+			return errors.New("比例参数重复")
+		}
+		seenRatios[ratio] = true
+	}
+	seen := map[string]bool{}
+	for _, price := range provider.VideoPrices {
+		if err := validateImageResolutionParameter(price.Resolution); err != nil {
+			return errors.New("视频分辨率参数必须为 1 至 64 个非控制字符")
+		}
+		key := strings.ToLower(price.Resolution)
+		if seen[key] {
+			return errors.New("视频分辨率价格重复")
+		}
+		seen[key] = true
+		if err := validateImageCallAmount(price.Amount); err != nil {
+			return errors.New("视频每秒价格必须为非负金额，最多四位小数且不超过 99999999.9999")
+		}
+	}
+	return nil
+}
+
+func requiresImageAspectRatios(info ai.ProviderType) bool {
+	if info.ImageRequestSchema != nil {
+		for _, field := range info.ImageRequestSchema.Fields {
+			if field.Key == "size" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// A selected default may be incomplete while an administrator configures it.
+func providerHasCapability(settings model.AISettings, id string, capability ai.Capability) bool {
+	p, ok := findProvider(settings, id)
+	if !ok || !p.Enabled {
+		return false
+	}
+	info, ok := ai.Type(p.Type)
+	return ok && info.Supports(capability)
+}

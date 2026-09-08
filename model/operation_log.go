@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"github.com/shopspring/decimal"
+	"time"
+)
 
 type OperationStatus string
 
@@ -12,25 +15,40 @@ const (
 
 // OperationLog records a server-side business action. Image tasks begin as
 // submitted and are finalized by the background worker.
+type VideoOperationDetails struct {
+	TaskID         string          `json:"taskId"`
+	Status         string          `json:"status"`
+	ProviderID     string          `json:"providerId"`
+	ProviderName   string          `json:"providerName"`
+	ProviderTaskID string          `json:"providerTaskId"`
+	Seconds        int             `json:"seconds"`
+	Size           string          `json:"size"`
+	Resolution     string          `json:"resolution"`
+	GenerateAudio  bool            `json:"generateAudio"`
+	Amount         decimal.Decimal `json:"amount"`
+}
+
 type OperationLog struct {
-	ID             string          `json:"id" gorm:"primaryKey"`
-	ActorUID       string          `json:"actorUid" gorm:"index"`
-	ActorName      string          `json:"actorName" gorm:"index"`
-	ActorRoles     []string        `json:"actorRoles" gorm:"serializer:json"`
-	Action         string          `json:"action" gorm:"index"`
-	Status         OperationStatus `json:"status" gorm:"index"`
-	TargetType     string          `json:"targetType"`
-	TargetID       string          `json:"targetId"`
-	ProviderTaskID string          `json:"providerTaskId,omitempty" gorm:"index"`
-	TargetName     string          `json:"targetName"`
-	Prompt         string          `json:"prompt" gorm:"type:text"`
-	MediaIDs       []string        `json:"mediaIds" gorm:"serializer:json"`
-	ErrorMessage   string          `json:"errorMessage"`
-	RequestSummary string          `json:"requestSummary,omitempty" gorm:"type:text"`
-	CreatedAt      time.Time       `json:"createdAt" gorm:"index"`
+	Video          *VideoOperationDetails `json:"video,omitempty" gorm:"-"`
+	ID             string                 `json:"id" gorm:"primaryKey"`
+	ActorUID       string                 `json:"actorUid" gorm:"index"`
+	ActorName      string                 `json:"actorName" gorm:"index"`
+	ActorRoles     []string               `json:"actorRoles" gorm:"serializer:json"`
+	Action         string                 `json:"action" gorm:"index"`
+	Status         OperationStatus        `json:"status" gorm:"index"`
+	TargetType     string                 `json:"targetType"`
+	TargetID       string                 `json:"targetId" gorm:"index"`
+	ProviderTaskID string                 `json:"providerTaskId,omitempty" gorm:"index"`
+	TargetName     string                 `json:"targetName"`
+	Prompt         string                 `json:"prompt" gorm:"type:text"`
+	MediaIDs       []string               `json:"mediaIds" gorm:"serializer:json"`
+	ErrorMessage   string                 `json:"errorMessage"`
+	RequestSummary string                 `json:"requestSummary,omitempty" gorm:"type:text"`
+	CreatedAt      time.Time              `json:"createdAt" gorm:"index"`
 }
 
 type OperationLogQuery struct {
+	MediaID  string
 	Action   string
 	Actor    string
 	Status   string

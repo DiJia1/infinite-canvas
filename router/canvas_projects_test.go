@@ -424,7 +424,7 @@ func TestCanvasProjectShareCopiesImageIntoRecipientLibrary(t *testing.T) {
 	}
 }
 
-func TestCanvasProjectShareRejectsVideos(t *testing.T) {
+func TestCanvasProjectShareRejectsLocalOnlyVideos(t *testing.T) {
 	stamp := time.Now().Format("20060102150405.000000000")
 	owner := "canvas-share-video-owner-" + stamp
 	projectID := "canvas-share-video-" + stamp
@@ -437,7 +437,7 @@ func TestCanvasProjectShareRejectsVideos(t *testing.T) {
 		t.Fatalf("create video project = %d/%s", response.Code, response.Body.String())
 	}
 	response := canvasRequest(t, http.MethodPost, "/api/v1/canvas/projects/"+projectID+"/share", owner, `{"revision":1,"recipientUserUids":["`+recipient+`"]}`)
-	if response.Code != http.StatusBadRequest || decodeCanvasResponse(t, response).Msg != "画布包含视频，暂不支持分享" {
+	if response.Code != http.StatusBadRequest || decodeCanvasResponse(t, response).Msg != "请先完成视频上传或生成，再分享画布" {
 		t.Fatalf("video share = %d/%s", response.Code, response.Body.String())
 	}
 }

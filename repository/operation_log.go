@@ -46,11 +46,19 @@ func ListOperationLogs(q model.OperationLogQuery) ([]model.OperationLog, int64, 
 	}
 	q.Normalize()
 	tx := db.Model(&model.OperationLog{})
+	if mediaID := strings.TrimSpace(q.MediaID); mediaID != "" {
+		tx = tx.Where("target_type = ? AND target_id = ?", MediaLifecycleTarget, mediaID)
+	}
 	if action := strings.TrimSpace(q.Action); action != "" {
 		tx = tx.Where("action = ?", action)
 	}
 	if status := strings.TrimSpace(q.Status); status != "" {
-		tx = tx.Where("status = ?", status)
+		switch status {
+		case "queued", "submitting", "running", "saving", "paused", "uncertain", "succeeded", "failed":
+			tx = tx.Where("EXISTS (SELECT 1 FROM video_generation_tasks v WHERE v.operation_log_id = operation_logs.id AND v.status = ?)", status)
+		default:
+			tx = tx.Where("status = ?", status)
+		}
 	}
 	if actor := strings.TrimSpace(q.Actor); actor != "" {
 		tx = tx.Where("actor_uid LIKE ? OR actor_name LIKE ?", "%"+actor+"%", "%"+actor+"%")
@@ -64,10 +72,14 @@ func ListOperationLogs(q model.OperationLogQuery) ([]model.OperationLog, int64, 
 	return items, total, err
 }
 
-func DeleteOperationLogsBefore(before time.Time) error {
+func DeleteExpiredOperationLogs(current time.Time) error {
+	return deleteOperationLogsBefore(current.Add(-7*24*time.Hour), current.Add(-30*24*time.Hour))
+}
+
+func deleteOperationLogsBefore(before, mediaBefore time.Time) error {
 	db, err := DB()
 	if err != nil {
 		return err
 	}
-	return db.Where("created_at < ?", before).Delete(&model.OperationLog{}).Error
+	return db.Where("((target_type IS NULL OR target_type <> ?) AND created_at < ?) OR (target_type = ? AND created_at < ?)", MediaLifecycleTarget, before, MediaLifecycleTarget, mediaBefore).Delete(&model.OperationLog{}).Error
 }

@@ -7,6 +7,7 @@ import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "../t
 export type NodeGenerationContext = {
     prompt: string;
     referenceImages: ReferenceImage[];
+    referenceVideos?: { nodeId?: string; mediaId?: string; duration?: number; storageKey?: string; url?: string }[];
     textCount: number;
     imageCount: number;
 };
@@ -17,6 +18,7 @@ export type NodeGenerationInput = {
     title: string;
     text?: string;
     image?: ReferenceImage;
+    video?: { nodeId?: string; mediaId?: string; duration?: number; storageKey?: string; url?: string };
 };
 
 export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], prompt: string, maskResources?: CanvasMaskResources): NodeGenerationContext {
@@ -30,6 +32,7 @@ export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData
     return {
         prompt: upstreamText ? `${prompt}\n\n${upstreamText}` : prompt,
         referenceImages,
+        referenceVideos: inputs.flatMap((input) => (input.video ? [input.video] : [])),
         textCount: inputs.filter((input) => input.type === "text").length,
         imageCount: referenceImages.length,
     };
@@ -37,6 +40,8 @@ export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData
 
 export function buildNodeGenerationInputs(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], maskResources?: CanvasMaskResources): NodeGenerationInput[] {
     return getOrderedUpstreamNodes(nodeId, nodes, connections).flatMap((node): NodeGenerationInput[] => {
+        if (node.type === CanvasNodeType.Video)
+            return [{ nodeId: node.id, type: "video", title: node.title, video: { nodeId: node.id, mediaId: node.metadata?.mediaId, duration: node.metadata?.duration, storageKey: node.metadata?.storageKey, url: node.metadata?.content } }];
         const image = readReferenceImage(node, maskResources);
         if (image) return [{ nodeId: node.id, type: "image" as const, title: node.title, image }];
         const text = readNodeTextInput(node);

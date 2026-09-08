@@ -5,6 +5,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/basketikun/infinite-canvas/model"
@@ -254,7 +255,7 @@ func OpenPublicImage(ctx context.Context, user PortalUser, id string) (io.ReadCl
 }
 
 func DeletePublicImage(ctx context.Context, id string) error {
-	item, found, err := repository.GetPublicImage(id)
+	_, found, err := repository.GetPublicImage(id)
 	if err != nil {
 		return err
 	}
@@ -265,10 +266,20 @@ func DeletePublicImage(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if err := deleteImageObject(ctx, store, item.Media.ObjectKey); err != nil {
+	actor, _ := PortalUserFromContext(ctx)
+	media, err := repository.PreparePublicImageDeletion(id, time.Now().UTC(), actor.UID)
+	if err != nil {
+		return safeMessageError{message: "素材正在使用或无法删除"}
+	}
+	if err := deleteImageObject(ctx, store, media.ObjectKey); err != nil {
+		auditMediaFailure(media, actor.UID, "delete_failed", "object_delete_failed")
 		return err
 	}
-	return repository.DeletePublicImageAndMedia(item.ID, item.MediaID)
+	_, err = repository.DeleteClaimedCanvasMedia(media.ID, media.CleanupClaimID)
+	if err != nil {
+		auditMediaFailure(media, actor.UID, "delete_failed", "record_delete_failed")
+	}
+	return err
 }
 
 func deleteMedia(ctx context.Context, id string) error {

@@ -44,3 +44,11 @@ describe("image request schema", () => {
         assert.equal(imageResolutionLabel("1536x1024"), "1536x1024");
     });
 });
+
+test("preserves unsupported explicit ratios instead of silently choosing a default", () => {
+    const ratioSchema = { ...schema, fields: [{ key: "size", label: "比例", type: "select" as const, required: true, default: "16:9", options: [{ value: "16:9", label: "16:9" }] }] };
+    assert.deepEqual(normalizeImageRequestOptions(ratioSchema, { size: "1:1" }), { size: "1:1" });
+    assert.deepEqual(normalizeImageRequestOptions(ratioSchema, { size: "" }), { size: "" });
+    assert.deepEqual(normalizeImageRequestOptions(ratioSchema, { size: "16:9" }), { size: "16:9" });
+    assert.deepEqual(normalizeImageRequestOptions({ ...ratioSchema, fields: [] }, { size: "1:1" }), {});
+});

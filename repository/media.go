@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -11,12 +12,21 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-func SaveMedia(item model.Media) (model.Media, error) {
+func SaveMedia(item model.Media, contexts ...context.Context) (model.Media, error) {
 	db, err := DB()
 	if err != nil {
 		return model.Media{}, err
 	}
-	return item, db.Create(&item).Error
+	if len(contexts) > 0 {
+		db = db.WithContext(contexts[0])
+	}
+	err = db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&item).Error; err != nil {
+			return err
+		}
+		return recordMediaLifecycle(tx, item, item.OwnerUID, "created", "", "resource_created")
+	})
+	return item, err
 }
 
 func GetMedia(id string) (model.Media, bool, error) {
@@ -32,12 +42,27 @@ func GetMedia(id string) (model.Media, bool, error) {
 	return item, err == nil, err
 }
 
-func DeleteMedia(id string) error {
+func DeleteMedia(id string, contexts ...context.Context) error {
 	db, err := DB()
 	if err != nil {
 		return err
 	}
-	return db.Delete(&model.Media{}, "id = ?", id).Error
+	if len(contexts) > 0 {
+		db = db.WithContext(contexts[0])
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		var item model.Media
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&item, "id = ?", id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		if err := tx.Delete(&item).Error; err != nil {
+			return err
+		}
+		return recordMediaLifecycle(tx, item, "", "deleted", "", "resource_removed")
+	})
 }
 
 func ListPrivateMedia(ownerUID string) ([]model.Media, error) {
@@ -47,6 +72,7 @@ func ListPrivateMedia(ownerUID string) ([]model.Media, error) {
 	}
 	items := make([]model.Media, 0)
 	err = db.Where("owner_uid = ?", ownerUID).
+		Where("content_type NOT LIKE ?", "video/%").
 		Where("cleanup_status = ?", model.MediaCleanupActive).
 		Where("expires_at IS NULL").
 		Where("NOT EXISTS (SELECT 1 FROM public_images WHERE public_images.media_id = media.id)").
@@ -60,8 +86,32 @@ func SetPrivateMediaExpiry(id, ownerUID string, expiresAt *time.Time) (bool, err
 	if err != nil {
 		return false, err
 	}
-	result := db.Model(&model.Media{}).Where("id = ? AND owner_uid = ? AND cleanup_status = ?", id, ownerUID, model.MediaCleanupActive).Update("expires_at", expiresAt)
-	return result.RowsAffected > 0, result.Error
+	updated := false
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var item model.Media
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND owner_uid = ? AND cleanup_status = ?", id, ownerUID, model.MediaCleanupActive).First(&item).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		if err := tx.Model(&model.Media{}).Where("id = ?", item.ID).Update("expires_at", expiresAt).Error; err != nil {
+			return err
+		}
+		if (item.ExpiresAt == nil && expiresAt != nil) || (item.ExpiresAt != nil && expiresAt == nil) || (item.ExpiresAt != nil && expiresAt != nil && !item.ExpiresAt.Equal(*expiresAt)) {
+			event := "cleanup_scheduled"
+			if expiresAt == nil {
+				event = "cleanup_cancelled"
+			}
+			item.ExpiresAt = expiresAt
+			if err := recordMediaLifecycle(tx, item, ownerUID, event, "", "retention_changed"); err != nil {
+				return err
+			}
+		}
+		updated = true
+		return nil
+	})
+	return updated, err
 }
 
 func ListExpiredPrivateMedia(before time.Time) ([]model.Media, error) {
@@ -170,6 +220,15 @@ func ClaimCanvasMediaCleanupBatch(ids []string, current time.Time, lease time.Du
 			}
 			referenced := public[item.ID]
 			if !referenced {
+				held, err := videoTaskReferences(tx, item.ID, current)
+				if held {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+			}
+			if !referenced {
 				refs, loaded := references[item.OwnerUID]
 				if !loaded {
 					var err error
@@ -193,6 +252,10 @@ func ClaimCanvasMediaCleanupBatch(ids []string, current time.Time, lease time.Du
 				if err := tx.Model(&model.Media{}).Where("id = ?", item.ID).Update("expires_at", nil).Error; err != nil {
 					return err
 				}
+				item.ExpiresAt = nil
+				if err := recordMediaLifecycle(tx, item, "", "cleanup_cancelled", "", "persisted_reference_found"); err != nil {
+					return err
+				}
 				continue
 			}
 			started := current.UTC()
@@ -207,6 +270,9 @@ func ClaimCanvasMediaCleanupBatch(ids []string, current time.Time, lease time.Du
 				"cleanup_status": item.CleanupStatus, "cleanup_started_at": item.CleanupStartedAt,
 				"cleanup_claim_id": item.CleanupClaimID, "cleanup_lease_until": item.CleanupLeaseUntil,
 			}).Error; err != nil {
+				return err
+			}
+			if err := recordMediaLifecycle(tx, item, "", "cleanup_started", "", "expired_unreferenced_resource"); err != nil {
 				return err
 			}
 			claimed = append(claimed, item)
@@ -241,6 +307,65 @@ func DeleteClaimedCanvasMedia(id, claimID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	result := db.Where("id = ? AND cleanup_status = ? AND cleanup_claim_id = ?", id, model.MediaCleanupDeleting, claimID).Delete(&model.Media{})
-	return result.RowsAffected > 0, result.Error
+	deleted := false
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var item model.Media
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND cleanup_status = ? AND cleanup_claim_id = ?", id, model.MediaCleanupDeleting, claimID).First(&item).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		if err := tx.Where("id = ? AND cleanup_status = ? AND cleanup_claim_id = ?", id, model.MediaCleanupDeleting, claimID).Delete(&model.Media{}).Error; err != nil {
+			return err
+		}
+		if err := recordMediaLifecycle(tx, item, "", "deleted", "", "object_and_record_deleted"); err != nil {
+			return err
+		}
+		deleted = true
+		return nil
+	})
+	return deleted, err
+}
+
+// PreparePrivateMediaDeletion uses the same lock as Canvas/task creation so a
+// direct delete cannot race a newly submitted video reference.
+func PreparePrivateMediaDeletion(id, ownerUID string, current time.Time) (model.Media, error) {
+	db, err := DB()
+	if err != nil {
+		return model.Media{}, err
+	}
+	var item model.Media
+	err = db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND owner_uid = ?", id, ownerUID).First(&item).Error; err != nil {
+			return err
+		}
+		if item.CleanupStatus == model.MediaCleanupDeleting {
+			return ErrCanvasMediaUnavailable
+		}
+		held, err := videoTaskReferences(tx, id, current)
+		if err != nil {
+			return err
+		}
+		if held {
+			return errors.New("素材正在被视频任务使用")
+		}
+		refs, err := canvasMediaReferences(tx, item.OwnerUID)
+		if err != nil {
+			return err
+		}
+		if _, held := refs[id]; held {
+			return errors.New("素材正在被画布使用")
+		}
+		until := current.Add(2 * time.Minute)
+		item.CleanupStatus = model.MediaCleanupDeleting
+		item.CleanupStartedAt = &current
+		item.CleanupLeaseUntil = &until
+		item.CleanupClaimID = uuid.NewString()
+		if err := tx.Model(&item).Updates(map[string]any{"cleanup_status": item.CleanupStatus, "cleanup_started_at": current, "cleanup_lease_until": until, "cleanup_claim_id": item.CleanupClaimID}).Error; err != nil {
+			return err
+		}
+		return recordMediaLifecycle(tx, item, ownerUID, "delete_requested", "", "manual_private_delete")
+	})
+	return item, err
 }

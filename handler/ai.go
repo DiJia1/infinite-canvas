@@ -142,20 +142,28 @@ func AIImageTaskByClientRequest(w http.ResponseWriter, r *http.Request, clientRe
 }
 
 func AIVideos(w http.ResponseWriter, r *http.Request) {
-	limitMultipartRequestBody(w, r, maxVideoRequestBytes)
-	request, err := videoRequestFromForm(r)
-	if err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var request service.CreateVideoTaskRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
 		Fail(w, "视频请求无效")
 		return
 	}
-	result, err := service.CreateVideo(r.Context(), request)
+	task, err := service.CreateVideoGenerationTask(r.Context(), request)
 	if err != nil {
-		service.RecordOperation(r.Context(), service.OperationLogInput{Action: "video_generate", Status: "failure", TargetType: "video_task", Prompt: request.Prompt, ErrorMessage: service.AuditErrorSummary(err, "视频生成失败")})
 		FailError(w, err)
 		return
 	}
-	service.RecordOperation(r.Context(), service.OperationLogInput{Action: "video_generate", TargetType: "video_task", TargetID: result.ID, Prompt: request.Prompt})
-	OK(w, result)
+	OK(w, task)
+}
+func AIVideoResume(w http.ResponseWriter, r *http.Request, id string) {
+	task, err := service.ResumeVideoGenerationTask(r.Context(), id)
+	if err != nil {
+		FailError(w, err)
+		return
+	}
+	OK(w, task)
 }
 
 func limitMultipartRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) {
@@ -163,7 +171,7 @@ func limitMultipartRequestBody(w http.ResponseWriter, r *http.Request, maxBytes 
 }
 
 func AIVideo(w http.ResponseWriter, r *http.Request, id string) {
-	result, err := service.GetVideo(r.Context(), id)
+	result, err := service.GetVideoGenerationTask(r.Context(), id)
 	if err != nil {
 		FailError(w, err)
 		return
@@ -172,16 +180,16 @@ func AIVideo(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func AIVideoContent(w http.ResponseWriter, r *http.Request, id string) {
-	result, err := service.GetVideoContent(r.Context(), id)
+	task, err := service.GetVideoGenerationTask(r.Context(), id)
 	if err != nil {
 		FailError(w, err)
 		return
 	}
-	if result.ContentType != "" {
-		w.Header().Set("Content-Type", result.ContentType)
+	if task.Status != "succeeded" || len(task.Videos) == 0 {
+		Fail(w, "视频尚未完成")
+		return
 	}
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(result.Data)
+	http.Redirect(w, r, task.Videos[0].URL, http.StatusTemporaryRedirect)
 }
 
 func videoRequestFromForm(r *http.Request) (ai.VideoRequest, error) {
@@ -235,4 +243,13 @@ func number(value string) int {
 		return 1
 	}
 	return result
+}
+
+func AIVideoByClient(w http.ResponseWriter, r *http.Request, client string) {
+	task, err := service.GetVideoGenerationTaskByClient(r.Context(), client)
+	if err != nil {
+		FailError(w, err)
+		return
+	}
+	OK(w, task)
 }

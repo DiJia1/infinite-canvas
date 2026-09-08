@@ -44,6 +44,44 @@ func (store localImageStore) Put(_ context.Context, key string, data []byte, _ s
 	}
 	return os.WriteFile(path, data, 0644)
 }
+
+// Copy creates an independent object without loading a whole video into memory.
+func (store localImageStore) Copy(ctx context.Context, source, target string) (err error) {
+	input, err := store.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	path := store.path(target)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	output, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(path)
+		}
+	}()
+	if err = ctx.Err(); err != nil {
+		output.Close()
+		return err
+	}
+	n, copyErr := io.Copy(output, io.LimitReader(input, maxMediaBytes+1))
+	closeErr := output.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if n <= 0 || n > maxMediaBytes {
+		return errors.New("分享视频大小无效")
+	}
+	return ctx.Err()
+}
 func (store localImageStore) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	return store.Open(key)
 }
@@ -83,6 +121,10 @@ func (store *ossImageStore) Put(ctx context.Context, key string, data []byte, co
 	_, err := store.internal.PutObject(ctx, &oss.PutObjectRequest{Bucket: oss.Ptr(store.bucket), Key: oss.Ptr(key), Body: bytes.NewReader(data), ContentType: oss.Ptr(contentType), ContentLength: oss.Ptr(int64(len(data))), Acl: oss.ObjectACLPrivate})
 	return err
 }
+func (store *ossImageStore) Copy(ctx context.Context, source, target string) error {
+	_, err := store.internal.CopyObject(ctx, &oss.CopyObjectRequest{Bucket: oss.Ptr(store.bucket), Key: oss.Ptr(target), SourceBucket: oss.Ptr(store.bucket), SourceKey: oss.Ptr(source), Acl: oss.ObjectACLPrivate})
+	return err
+}
 func (store *ossImageStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	result, err := store.internal.GetObject(ctx, &oss.GetObjectRequest{Bucket: oss.Ptr(store.bucket), Key: oss.Ptr(key)})
 	if err != nil {
@@ -95,7 +137,18 @@ func (store *ossImageStore) Delete(ctx context.Context, key string) error {
 	return err
 }
 func (store *ossImageStore) SignedURL(ctx context.Context, key, process string) (string, time.Time, error) {
+	return store.signedAccessURL(ctx, key, process, "")
+}
+
+func (store *ossImageStore) SignedDownloadURL(ctx context.Context, key, disposition string) (string, time.Time, error) {
+	return store.signedAccessURL(ctx, key, "", disposition)
+}
+
+func (store *ossImageStore) signedAccessURL(ctx context.Context, key, process, disposition string) (string, time.Time, error) {
 	request := &oss.GetObjectRequest{Bucket: oss.Ptr(store.bucket), Key: oss.Ptr(key)}
+	if disposition != "" {
+		request.ResponseContentDisposition = oss.Ptr(disposition)
+	}
 	if process != "" {
 		request.Process = oss.Ptr(process)
 	}

@@ -2,6 +2,7 @@
 
 import { type ReactNode } from "react";
 import { ConfigProvider } from "antd";
+import { CanvasSettingsSelect } from "@/components/canvas-settings-select";
 
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { imageAspectOptions } from "@/lib/image-generation-config";
@@ -34,9 +35,11 @@ export function ImageSettingsPanel({ config, onConfigChange, onProviderOptionsCh
     const updateProviderOption = (key: string, value: unknown) => {
         if (!schema) return;
         const next = { ...providerOptions, [key]: value };
+        if (key !== "size" && field("size")) next.size = activeSize;
         if (key === "background" && value === "transparent" && next.outputFormat === "jpeg") next.outputFormat = "png";
         if (key === "outputFormat" && value === "jpeg" && next.background === "transparent") next.background = field("background")?.options?.some((item) => item.value === "auto") ? "auto" : "opaque";
         const normalized = normalizeImageRequestOptions(schema, next);
+        if (field("size")) normalized.size = next.size;
         onProviderOptionsChange?.(normalized);
         if (key === "quality" || key === "size" || key === "resolution" || key === "outputFormat" || key === "background") {
             onConfigChange(key, typeof normalized[key] === "string" ? normalized[key] : String(value));
@@ -44,7 +47,9 @@ export function ImageSettingsPanel({ config, onConfigChange, onProviderOptionsCh
     };
     const quality = schemaOptionString(providerOptions, "quality") || config.quality || "auto";
     const count = Math.max(1, Math.min(maxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
-    const activeSize = schemaOptionString(providerOptions, "size") || config.size || "auto";
+    const activeSize = schemaOptionString(config.providerOptions, "size") || config.size || "";
+    const sizeOptions = field("size")?.options || [];
+    const invalidSize = Boolean(field("size") && !sizeOptions.some((item) => item.value === activeSize));
     const resolution = schemaOptionString(providerOptions, "resolution") || config.resolution;
     const outputFormat = schemaOptionString(providerOptions, "outputFormat") || normalizeImageOutputFormat(config.outputFormat);
     const background = schemaOptionString(providerOptions, "background") || normalizeImageBackground(config.background);
@@ -68,94 +73,69 @@ export function ImageSettingsPanel({ config, onConfigChange, onProviderOptionsCh
                 {!schema || field("resolution") ? (
                     <div className="space-y-2.5">
                         <SettingTitle color={theme.node.muted}>尺寸</SettingTitle>
-                        <select
-                            className="h-10 w-full rounded-xl border bg-transparent px-3 text-sm outline-none"
-                            style={{ borderColor: theme.node.stroke, color: theme.node.text }}
-                            value={resolution}
-                            onChange={(event) => (schema ? updateProviderOption("resolution", event.target.value) : onConfigChange("resolution", event.target.value))}
-                            onMouseDown={(event) => event.stopPropagation()}
-                        >
-                            {fieldOptions("resolution", []).map((item) => (
-                                <option key={item.value} value={item.value}>
-                                    {imageRequestOptionLabel(item)}
-                                </option>
-                            ))}
-                        </select>
+                        <CanvasSettingsSelect
+                            aria-label="尺寸"
+                            value={resolution || undefined}
+                            options={fieldOptions("resolution", []).map((item) => ({ value: item.value, label: imageRequestOptionLabel(item) }))}
+                            onChange={(value) => (schema ? updateProviderOption("resolution", value) : onConfigChange("resolution", value))}
+                        />
                     </div>
                 ) : null}
-                {!schema || field("size") ? (
+                {field("size") ? (
                     <div className="space-y-2.5">
                         <SettingTitle color={theme.node.muted}>宽高比</SettingTitle>
-                        <div className="grid grid-cols-4 gap-2.5">
-                            {imageAspectOptions
-                                .filter((item) => fieldOptions("size", imageAspectOptions).some((option) => option.value === item.value))
-                                .map((item) => (
-                                    <button
-                                        key={item.value}
-                                        type="button"
-                                        className="flex h-[72px] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border bg-transparent text-sm transition hover:opacity-80"
-                                        style={{ borderColor: activeSize === item.value ? theme.node.text : theme.node.stroke, background: "transparent", color: theme.node.text }}
-                                        onMouseDown={(event) => event.stopPropagation()}
-                                        onClick={() => (schema ? updateProviderOption("size", item.value) : onConfigChange("size", item.value))}
-                                    >
-                                        <AspectIcon type={item.icon} width={item.width} height={item.height} color={theme.node.text} />
-                                        <span>{item.label}</span>
-                                    </button>
-                                ))}
-                        </div>
+                        <CanvasSettingsSelect
+                            aria-label="宽高比"
+                            className="w-full"
+                            value={invalidSize ? undefined : activeSize || undefined}
+                            placeholder={sizeOptions.length ? "请选择比例" : "管理员尚未配置比例"}
+                            options={sizeOptions}
+                            onChange={(value) => updateProviderOption("size", value)}
+                        />
+                        {invalidSize && (
+                            <p role="alert" className="text-xs">
+                                {sizeOptions.length ? "请选择当前模型支持的比例" : "管理员尚未配置比例"}
+                            </p>
+                        )}
                     </div>
+                ) : null}
+                {schema && !field("size") ? (
+                    <p className="text-xs" style={{ color: theme.node.muted }}>
+                        请在提示词中描述画面比例。
+                    </p>
                 ) : null}
                 {!schema || field("outputFormat") ? (
                     <div className="space-y-2.5">
                         <SettingTitle color={theme.node.muted}>输出格式</SettingTitle>
-                        <div className="grid grid-cols-2 gap-2.5">
-                            {fieldOptions("outputFormat", [
-                                { value: "jpeg", label: "JPEG" },
-                                { value: "png", label: "PNG" },
-                            ]).map((item) => (
-                                <OptionPill
-                                    key={item.value}
-                                    selected={outputFormat === item.value}
-                                    theme={theme}
-                                    onClick={() => {
-                                        if (schema) updateProviderOption("outputFormat", item.value);
-                                        else {
-                                            onConfigChange("outputFormat", item.value);
-                                            if (item.value === "jpeg" && background === "transparent") onConfigChange("background", "auto");
-                                        }
-                                    }}
-                                >
-                                    {item.label}
-                                </OptionPill>
-                            ))}
-                        </div>
+                        <CanvasSettingsSelect
+                            aria-label="输出格式"
+                            value={outputFormat}
+                            options={fieldOptions("outputFormat", [{ value: "jpeg", label: "JPEG" }, { value: "png", label: "PNG" }]).map((item) => ({ value: item.value, label: imageRequestOptionLabel(item) }))}
+                            onChange={(value) => {
+                                if (schema) updateProviderOption("outputFormat", value);
+                                else {
+                                    onConfigChange("outputFormat", value);
+                                    if (value === "jpeg" && background === "transparent") onConfigChange("background", "auto");
+                                }
+                            }}
+                        />
                     </div>
                 ) : null}
                 {!schema || field("background") ? (
                     <div className="space-y-2.5">
                         <SettingTitle color={theme.node.muted}>背景</SettingTitle>
-                        <div className="grid grid-cols-3 gap-2.5">
-                            {fieldOptions("background", [
-                                { value: "auto", label: "自动" },
-                                { value: "opaque", label: "不透明" },
-                                { value: "transparent", label: "透明" },
-                            ]).map((item) => (
-                                <OptionPill
-                                    key={item.value}
-                                    selected={background === item.value}
-                                    theme={theme}
-                                    onClick={() => {
-                                        if (schema) updateProviderOption("background", item.value);
-                                        else {
-                                            if (item.value === "transparent" && outputFormat === "jpeg") onConfigChange("outputFormat", "png");
-                                            onConfigChange("background", item.value);
-                                        }
-                                    }}
-                                >
-                                    {item.label}
-                                </OptionPill>
-                            ))}
-                        </div>
+                        <CanvasSettingsSelect
+                            aria-label="背景"
+                            value={background}
+                            options={fieldOptions("background", [{ value: "auto", label: "自动" }, { value: "opaque", label: "不透明" }, { value: "transparent", label: "透明" }]).map((item) => ({ value: item.value, label: imageRequestOptionLabel(item) }))}
+                            onChange={(value) => {
+                                if (schema) updateProviderOption("background", value);
+                                else {
+                                    if (value === "transparent" && outputFormat === "jpeg") onConfigChange("outputFormat", "png");
+                                    onConfigChange("background", value);
+                                }
+                            }}
+                        />
                     </div>
                 ) : null}
                 {schema?.fields
@@ -165,14 +145,12 @@ export function ImageSettingsPanel({ config, onConfigChange, onProviderOptionsCh
                     ))}
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>生成张数</SettingTitle>
-                    <div className="grid grid-cols-4 gap-2.5">
-                        {[1, 3, 5].map((value) => (
-                            <OptionPill key={value} selected={count === value} theme={theme} onClick={() => onConfigChange("count", String(value))}>
-                                {value} 张
-                            </OptionPill>
-                        ))}
-                        <CountInput value={count} max={maxCount} theme={theme} onChange={(value) => onConfigChange("count", String(value || 1))} />
-                    </div>
+                    <CanvasSettingsSelect
+                        aria-label="生成张数"
+                        value={String(count)}
+                        options={Array.from({ length: maxCount }, (_, index) => ({ value: String(index + 1), label: `${index + 1} 张` }))}
+                        onChange={(value) => onConfigChange("count", value)}
+                    />
                 </div>
             </div>
         </ImageSettingsTheme>
@@ -268,35 +246,6 @@ function OptionPill({ selected, theme, onClick, children }: { selected: boolean;
         >
             {children}
         </button>
-    );
-}
-
-function CountInput({ value, max, theme, onChange }: { value: number; max: number; theme: CanvasTheme; onChange: (value: number | null) => void }) {
-    return (
-        <label className="col-span-2 flex h-9 overflow-hidden rounded-full border text-sm" style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
-            <input
-                type="number"
-                min={1}
-                max={max}
-                className="min-w-0 flex-1 bg-transparent px-3 text-center outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                style={{ color: theme.node.text, WebkitTextFillColor: theme.node.text }}
-                value={value || ""}
-                onChange={(event) => onChange(Number(event.target.value) || null)}
-                onMouseDown={(event) => event.stopPropagation()}
-            />
-        </label>
-    );
-}
-
-function AspectIcon({ type, width, height, color }: { type: string; width: number; height: number; color: string }) {
-    if (type === "auto") return null;
-    const ratio = width / Math.max(1, height);
-    const boxWidth = ratio >= 1 ? 24 : Math.max(10, 24 * ratio);
-    const boxHeight = ratio >= 1 ? Math.max(10, 24 / ratio) : 24;
-    return (
-        <span className="grid h-7 w-9 place-items-center">
-            <span className="border-2" style={{ width: boxWidth, height: boxHeight, borderColor: color }} />
-        </span>
     );
 }
 

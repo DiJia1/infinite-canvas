@@ -396,3 +396,36 @@ func jsonResponse(body string) *http.Response {
 func jsonStatusResponse(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}
 }
+
+func TestMaiziAdministratorAspectRatioSchema(t *testing.T) {
+	raw, err := newMaiziProvider(json.RawMessage(`{"apiKey":"test","model":"model"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := raw.(*maiziProvider)
+	schema := maiziImageRequestSchema
+	schema.Fields = append([]ai.ImageRequestField(nil), schema.Fields...)
+	for i := range schema.Fields {
+		if schema.Fields[i].Key == "size" {
+			schema.Fields[i].Options = []ai.ImageRequestFieldOption{{Value: "5:4", Label: "5:4"}}
+			schema.Fields[i].Default = json.RawMessage(`"5:4"`)
+		}
+	}
+	input := ai.ImageTaskRequest{Request: ai.ImageRequest{Prompt: "test", Size: "5:4", Resolution: "2K"}, RequestSchema: &schema}
+	normalized, err := p.NormalizeImageTaskRequest(input)
+	if err != nil || normalized.Request.Size != "5:4" {
+		t.Fatalf("%+v %v", normalized, err)
+	}
+	if p.v1ImageTaskBody(normalized.Request, nil, false)["size"] != "5:4" {
+		t.Fatal("ratio not forwarded")
+	}
+	input.Request.Size = "1:1"
+	if _, err = p.NormalizeImageTaskRequest(input); err == nil {
+		t.Fatal("unconfigured ratio accepted")
+	}
+	input.RequestSchema = nil
+	input.Request.Size = "5:4"
+	if _, err = p.NormalizeImageTaskRequest(input); err == nil {
+		t.Fatal("static schema mutated")
+	}
+}

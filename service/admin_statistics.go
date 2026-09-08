@@ -14,6 +14,7 @@ import (
 const statisticsTimezone = "Asia/Shanghai"
 
 type ImageStatistics struct {
+	Video              VideoStatistics        `json:"video"`
 	StartDate          string                 `json:"startDate"`
 	EndDate            string                 `json:"endDate"`
 	Timezone           string                 `json:"timezone"`
@@ -72,7 +73,14 @@ func Statistics(startDate, endDate string, reference time.Time) (ImageStatistics
 	if err != nil {
 		return ImageStatistics{}, err
 	}
-	userUIDs := make([]string, 0, len(tasks))
+	videoTasks, err := repository.ListSucceededVideoGenerationTasksFinishedBetween(period.StartUTC, period.EndUTC)
+	if err != nil {
+		return ImageStatistics{}, err
+	}
+	userUIDs := make([]string, 0, len(tasks)+len(videoTasks))
+	for _, task := range videoTasks {
+		userUIDs = append(userUIDs, task.OwnerUID)
+	}
 	for _, task := range tasks {
 		userUIDs = append(userUIDs, task.OwnerUID)
 	}
@@ -81,6 +89,7 @@ func Statistics(startDate, endDate string, reference time.Time) (ImageStatistics
 		return ImageStatistics{}, err
 	}
 	result := aggregateImageTaskStatistics(tasks, displayNames)
+	result.Video = aggregateVideoTaskStatistics(videoTasks, displayNames)
 	result.StartDate = period.StartDate
 	result.EndDate = period.EndDate
 	result.Timezone = statisticsTimezone

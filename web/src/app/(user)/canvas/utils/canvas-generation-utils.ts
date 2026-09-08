@@ -1,3 +1,4 @@
+import { reconcileVideoConfig, type VideoModelStatus } from "@/lib/video-config";
 import { normalizeImageBackground, normalizeImageOutputFormat } from "../../../../lib/image-output-config.ts";
 import { normalizePersistedAiConfig, type AiConfig } from "../../../../lib/ai-config";
 import type { ReferenceImage } from "../../../../types/image";
@@ -96,7 +97,9 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
             : {}),
         ...(node?.metadata?.videoProviderId || currentConfig.videoProviderId ? { videoProviderId: node?.metadata?.videoProviderId || currentConfig.videoProviderId } : {}),
         videoSeconds: node?.metadata?.seconds || currentConfig.videoSeconds || defaults.videoSeconds,
-        vquality: node?.metadata?.vquality || currentConfig.vquality || defaults.vquality,
+        videoSize: node?.metadata?.videoSize ?? currentConfig.videoSize ?? "",
+        generateAudio: node?.metadata?.generateAudio ?? currentConfig.generateAudio ?? "false",
+        vquality: node?.metadata?.vquality !== undefined ? node.metadata.vquality : node?.type === CanvasNodeType.Config ? null : currentConfig.vquality,
         count: String(node?.metadata?.count || currentConfig.count || defaults.count),
     };
 }
@@ -104,14 +107,16 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
 // Config nodes own their selected provider. This migrates nodes created before
 // provider selection existed, so a later global preference change cannot alter
 // an existing workflow.
-export function snapshotConfigNodeProviderSelection(nodes: CanvasNodeData[], config: AiConfig): CanvasNodeData[] {
+export function snapshotConfigNodeProviderSelection(nodes: CanvasNodeData[], config: AiConfig, status?: VideoModelStatus | null): CanvasNodeData[] {
     let changed = false;
     const next = nodes.map((node) => {
         if (node.type !== CanvasNodeType.Config) return node;
         const metadata = node.metadata || {};
         const needsImageSnapshot = !metadata.imageProviderId && Boolean(config.imageProviderId);
         const needsVideoSnapshot = !metadata.videoProviderId && Boolean(config.videoProviderId);
-        if (!needsImageSnapshot && !needsVideoSnapshot) return node;
+        const video = reconcileVideoConfig({ ...config, videoProviderId: metadata.videoProviderId || config.videoProviderId, vquality: metadata.vquality ?? null }, status);
+        const needsVideoResolution = Boolean(status) && (metadata.vquality !== video.vquality || metadata.videoProviderId !== video.videoProviderId);
+        if (!needsImageSnapshot && !needsVideoSnapshot && !needsVideoResolution) return node;
         changed = true;
         return {
             ...node,
@@ -126,6 +131,7 @@ export function snapshotConfigNodeProviderSelection(nodes: CanvasNodeData[], con
                       }
                     : {}),
                 ...(needsVideoSnapshot ? { videoProviderId: config.videoProviderId } : {}),
+                ...(needsVideoResolution ? { videoProviderId: video.videoProviderId, vquality: video.vquality } : {}),
             },
         };
     });
@@ -139,7 +145,7 @@ function generationResolution(config: Pick<AiConfig, "resolution" | "imageProvid
 export function resetInterruptedGeneration(nodes: CanvasNodeData[]): CanvasNodeData[] {
     return nodes.map((node) => {
         if (node.metadata?.status !== "loading") return node;
-        if (node.metadata.imageTaskId || node.metadata.imageTaskClientRequestId) return node;
+        if (node.metadata.videoTaskId || node.metadata.videoTaskClientRequestId || node.metadata.imageTaskId || node.metadata.imageTaskClientRequestId) return node;
         return { ...node, metadata: { ...node.metadata, status: "error" as const, errorDetails: "页面刷新后生成已中断，请重新生成。" } };
     });
 }

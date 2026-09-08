@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Alert, Card, Empty, Spin } from "antd";
+import { Alert, Card, Empty, Spin, Tabs } from "antd";
 import { useState } from "react";
 
 import { formatCNYAmount } from "@/lib/money";
@@ -9,6 +9,7 @@ import { statisticsPresetRange, type StatisticsPreset, type StatisticsRange } fr
 import { fetchStatistics } from "@/services/api/admin-statistics";
 import { useAdminStore } from "@/stores/use-admin-store";
 
+import { VideoStatisticsReport } from "./video-statistics-report";
 import { StatisticsRangeFilter } from "./statistics-range-filter";
 import { StatisticsReportTabs } from "./statistics-report-tabs";
 
@@ -50,13 +51,26 @@ export default function AdminStatisticsPage() {
                 <h1 className="text-xl font-semibold">统计</h1>
                 <StatisticsRangeFilter range={selectedRange} onPreset={selectPreset} onRangeChange={setSelectedRange} onSearch={() => setRange(selectedRange)} />
             </div>
-            <div className="grid gap-4 md:grid-cols-3">
-                <StatisticCard label="费用" value={formatCNYAmount(data.amount)} hint="所选时间范围内的成功任务" />
-                <StatisticCard label="成功图片" value={`${data.imageCount} 张`} hint="按实际生成结果统计" />
-                <StatisticCard label="活跃用户" value={`${activeUsers} 人`} hint="产生成功图片任务的成员" />
-            </div>
-            {data.unpricedImageCount > 0 ? <Alert type="warning" showIcon message={`有 ${data.unpricedImageCount} 张历史成功图片没有费用快照，已计入图片数量但未计入费用。`} /> : null}
-            <StatisticsReportTabs users={data.users} models={data.models} />
+            <Tabs
+                items={[
+                    {
+                        key: "image",
+                        label: "图片",
+                        children: (
+                            <div className="space-y-5">
+                                <div className="grid gap-4 md:grid-cols-3">
+                                    <StatisticCard label="费用" value={formatCNYAmount(data.amount)} hint="所选时间范围内的成功任务" />
+                                    <StatisticCard label="成功图片" value={`${data.imageCount} 张`} hint="按实际生成结果统计" />
+                                    <StatisticCard label="活跃用户" value={`${activeUsers} 人`} hint="产生成功图片任务的成员" />
+                                </div>
+                                {data.unpricedImageCount > 0 ? <Alert type="warning" showIcon message={`有 ${data.unpricedImageCount} 张历史成功图片没有费用快照，已计入图片数量但未计入费用。`} /> : null}
+                                <StatisticsReportTabs users={data.users} models={data.models} />
+                            </div>
+                        ),
+                    },
+                    { key: "video", label: "视频", children: <VideoStatisticsReport data={data.video} /> },
+                ]}
+            />
         </main>
     );
 }

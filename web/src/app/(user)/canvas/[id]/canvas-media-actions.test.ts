@@ -22,7 +22,13 @@ test("saving a remote image preserves its reference without adding content to th
     const image = { id: "remote", type: CanvasNodeType.Image, width: 100, height: 100, metadata: { mediaId: "media-1" } };
     const saved: any[] = [];
     const messages: string[] = [];
-    const save = callback("saveNodeAsset", { canSaveNodeAsAsset, canvasImageSource: () => "blob:runtime", addAsset: (asset: unknown) => saved.push(asset), getDataUrlByteSize: () => 0, message: { error: () => undefined, success: (text: string) => messages.push(text) } });
+    const save = callback("saveNodeAsset", {
+        canSaveNodeAsAsset,
+        canvasImageSource: () => "blob:runtime",
+        addAsset: (asset: unknown) => saved.push(asset),
+        getDataUrlByteSize: () => 0,
+        message: { error: () => undefined, success: (text: string) => messages.push(text) },
+    });
     await save(image);
     assert.equal(saved[0].metadata.mediaId, "media-1");
     assert.equal(saved[0].coverUrl, "blob:runtime");
@@ -34,13 +40,37 @@ test("saving a remote image preserves its reference without adding content to th
 test("downloads resolve remote and public references and propagate access failures", async () => {
     const saved: string[] = [];
     const download = callback("downloadNodeImage", {
-        CanvasNodeType, resolveStoredImageReference: async () => "", loadMediaImage: async (_id: string, resolve: () => Promise<string>) => ({ url: await resolve() }),
-        resolveRemoteImage: async (id: string) => { if (id === "missing") throw new Error("not found"); return "remote-url"; },
-        fetchPublicImageAccess: async () => ({ url: "public-url" }), saveAs: (url: string) => saved.push(url), imageExtension: () => "png",
+        CanvasNodeType,
+        resolveStoredImageReference: async () => "",
+        loadMediaImage: async (_id: string, resolve: () => Promise<string>) => ({ url: await resolve() }),
+        resolveRemoteImage: async (id: string) => {
+            if (id === "missing") throw new Error("not found");
+            return "remote-url";
+        },
+        fetchPublicImageAccess: async () => ({ url: "public-url" }),
+        saveAs: (url: string) => saved.push(url),
+        imageExtension: () => "png",
     });
     await download({ id: "one", type: CanvasNodeType.Image, metadata: { mediaId: "one" } });
     await download({ id: "two", type: CanvasNodeType.Image, metadata: { publicImageId: "two" } });
     assert.deepEqual(saved, ["remote-url", "public-url"]);
     await assert.rejects(download({ id: "missing", type: CanvasNodeType.Image, metadata: { mediaId: "missing" } }), /not found/);
     assert.equal(saved.length, 2);
+});
+
+test("video download resolves stable media without document content", async () => {
+    const saved: string[] = [];
+    const download = callback("downloadNodeImage", {
+        CanvasNodeType,
+        getVideoMediaAccess: async (id: string) => {
+            if (id === "missing") throw new Error("视频不可访问");
+            return { url: "https://oss.example/video" };
+        },
+        saveAs: (url: string) => saved.push(url),
+    });
+    const node = { id: "video", type: CanvasNodeType.Video, metadata: { mediaId: "video-media" } };
+    await download(node);
+    assert.deepEqual(saved, ["https://oss.example/video"]);
+    assert.equal("content" in node.metadata, false);
+    await assert.rejects(download({ ...node, metadata: { mediaId: "missing" } }), /不可访问/);
 });

@@ -20,6 +20,8 @@ export type AdminAIProvider = {
     type: string;
     enabled: boolean;
     imagePrices: ImageResolutionPrice[];
+    videoPrices?: ImageResolutionPrice[];
+    aspectRatios?: string[];
     config: Record<string, unknown>;
 };
 

@@ -11,12 +11,15 @@ import (
 	_ "image/png"
 	"io"
 	"log"
+	"math"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/basketikun/infinite-canvas/config"
@@ -30,6 +33,7 @@ const mediaPreviewProcess = "image/resize,w_320/quality,q_80/format,webp"
 const mediaUploadIntentTTL = 15 * time.Minute
 
 type MediaAccess struct {
+	Duration       float64    `json:"duration"`
 	MediaID        string     `json:"mediaId"`
 	URL            string     `json:"url"`
 	PreviewURL     string     `json:"previewUrl"`
@@ -111,6 +115,9 @@ func CreateMediaUploadIntent(ctx context.Context, user PortalUser, input MediaUp
 		return MediaUploadIntentView{}, err
 	}
 	if _, unsupported := store.(localImageStore); unsupported {
+		if extension == "mp4" {
+			return MediaUploadIntentView{}, safeMessageError{message: "视频上传需要 OSS 存储"}
+		}
 		return MediaUploadIntentView{Mode: "proxy"}, nil
 	}
 	createdAt := time.Now().UTC()
@@ -173,7 +180,50 @@ func CompleteMediaUploadIntent(ctx context.Context, user PortalUser, id string) 
 	}
 	completedAt := time.Now().UTC()
 	item := model.Media{ID: newID("media"), OwnerUID: user.UID, Source: model.MediaSourceUpload, ObjectKey: intent.ObjectKey, ContentType: intent.ContentType, Bytes: intent.ExpectedBytes, Filename: intent.Filename, Title: strings.TrimSuffix(intent.Filename, filepath.Ext(intent.Filename)), CreatedAt: completedAt.Format(time.RFC3339)}
-	updatedIntent, media, created, err := repository.FinalizeMediaUploadIntent(intent.ID, user.UID, completedAt.Format(time.RFC3339Nano), item)
+	if intent.ContentType == "video/mp4" {
+		intent, err = repository.ClaimVideoUploadCompletion(intent.ID, user.UID, privateImageObjectKey(user.UID, model.MediaSourceUpload, "mp4", completedAt), time.Now().UTC())
+		if err != nil {
+			return MediaAccess{}, false, safeMessageError{message: "视频确认进行中或已过期，请稍后重试"}
+		}
+		if intent.CompletedMediaID != "" {
+			access, err := MediaAccessURL(ctx, user, intent.CompletedMediaID)
+			return access, false, err
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		// Copy to an immutable object before publishing media: the upload URL
+		// may remain writable until expiry after the completion call.
+		reader, err := store.Get(ctx, intent.ObjectKey)
+		if err != nil {
+			return MediaAccess{}, false, err
+		}
+		file, err := spoolVideo(reader)
+		reader.Close()
+		if err != nil {
+			return MediaAccess{}, false, err
+		}
+		defer os.Remove(file.Name())
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil || info.Size() != intent.ExpectedBytes {
+			return MediaAccess{}, false, safeMessageError{message: "视频上传校验失败，请重新上传"}
+		}
+		item.Duration, item.Width, item.Height, err = probeVideoFile(ctx, file.Name())
+		if err != nil {
+			return MediaAccess{}, false, err
+		}
+		item.ObjectKey = intent.FinalObjectKey
+		expiry := time.Now().UTC().Add(24 * time.Hour)
+		item.ExpiresAt = &expiry
+		if err := putVideoFile(ctx, store, item.ObjectKey, file); err != nil {
+			return MediaAccess{}, false, err
+		}
+	}
+	updatedIntent, media, created, err := repository.FinalizeMediaUploadIntent(intent.ID, user.UID, time.Now().UTC().Format(time.RFC3339Nano), item, intent.FinalizeClaimID)
+	// The intent owns the reserved object until publication or expiry. A DB
+	// error may mean COMMIT succeeded: never delete that object here.
+
 	if err != nil {
 		return MediaAccess{}, false, err
 	}
@@ -208,6 +258,7 @@ func validateMediaUploadIntentInput(input MediaUploadIntentInput) (model.MediaSo
 }
 
 var mediaUploadExtensions = map[string]string{
+	"video/mp4":  "mp4",
 	"image/gif":  "gif",
 	"image/jpeg": "jpg",
 	"image/png":  "png",
@@ -270,7 +321,8 @@ func saveImage(ctx context.Context, user PortalUser, source model.MediaSource, f
 	return mediaAccess(ctx, store, saved)
 }
 
-func MediaAccessURL(ctx context.Context, user PortalUser, id string) (MediaAccess, error) {
+func MediaAccessURL(ctx context.Context, user PortalUser, id string, downloadFilename ...string) (result MediaAccess, resultErr error) {
+	defer func() { auditMediaAccessFailure(model.Media{ID: id}, user.UID, resultErr) }()
 	item, found, err := repository.GetMedia(id)
 	if err != nil {
 		return MediaAccess{}, err
@@ -289,7 +341,51 @@ func MediaAccessURL(ctx context.Context, user PortalUser, id string) (MediaAcces
 	if err != nil {
 		return MediaAccess{}, err
 	}
+	if len(downloadFilename) > 0 {
+		if !strings.HasPrefix(item.ContentType, "video/") {
+			return MediaAccess{}, safeMessageError{message: "仅支持视频下载"}
+		}
+		return videoDownloadAccess(ctx, store, item, downloadFilename[0])
+	}
 	return mediaAccess(ctx, store, item)
+}
+
+func VideoDownloadDisposition(filename string) string {
+	var safe []rune
+	for _, r := range filename {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.' {
+			safe = append(safe, r)
+		}
+		if len(safe) >= 120 {
+			break
+		}
+	}
+	name := strings.Trim(string(safe), ".")
+	if name == "" {
+		name = "canvas-video"
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".mp4") {
+		name += ".mp4"
+	}
+	return mime.FormatMediaType("attachment", map[string]string{"filename": name})
+}
+
+func videoDownloadAccess(ctx context.Context, store imageStore, item model.Media, filename string) (MediaAccess, error) {
+	disposition := VideoDownloadDisposition(filename)
+	if _, local := store.(localImageStore); local {
+		return MediaAccess{MediaID: item.ID, URL: "/api/v1/media/" + url.PathEscape(item.ID) + "/content?download=1&filename=" + url.QueryEscape(filename), ContentType: item.ContentType}, nil
+	}
+	signer, ok := store.(interface {
+		SignedDownloadURL(context.Context, string, string) (string, time.Time, error)
+	})
+	if !ok {
+		return MediaAccess{}, errors.New("当前存储不支持视频附件下载")
+	}
+	address, expires, err := signer.SignedDownloadURL(ctx, item.ObjectKey, disposition)
+	if err != nil {
+		return MediaAccess{}, fmt.Errorf("生成视频下载地址失败: %w", err)
+	}
+	return MediaAccess{MediaID: item.ID, URL: address, ExpiresAt: expires, ContentType: item.ContentType}, nil
 }
 
 func DeletePrivateMedia(ctx context.Context, user PortalUser, id string) error {
@@ -318,10 +414,16 @@ func DeletePrivateMedia(ctx context.Context, user PortalUser, id string) error {
 	if err != nil {
 		return privateMediaDeleteFailure(id, err)
 	}
+	item, err = repository.PreparePrivateMediaDeletion(item.ID, item.OwnerUID, time.Now().UTC())
+	if err != nil {
+		return safeMessageError{message: "素材正在使用或无法删除"}
+	}
 	if err := deleteImageObject(ctx, store, item.ObjectKey); err != nil {
+		auditMediaFailure(item, user.UID, "delete_failed", "object_delete_failed")
 		return privateMediaDeleteFailure(id, err)
 	}
-	if err := repository.DeleteMedia(item.ID); err != nil {
+	if _, err := repository.DeleteClaimedCanvasMedia(item.ID, item.CleanupClaimID); err != nil {
+		auditMediaFailure(item, user.UID, "delete_failed", "record_delete_failed")
 		return privateMediaDeleteFailure(id, err)
 	}
 	return nil
@@ -348,23 +450,44 @@ func isMissingImageObjectError(err error) bool {
 	return errors.As(err, &serviceError) && serviceError.StatusCode == http.StatusNotFound
 }
 
+func videoSnapshotProcess(duration float64) string {
+	millis := 0
+	if duration > 0 && !math.IsInf(duration, 0) && !math.IsNaN(duration) {
+		millis = int(math.Min(500, duration*500))
+	}
+	return fmt.Sprintf("video/snapshot,t_%d,f_jpg,w_480", millis)
+}
+
 func mediaAccess(ctx context.Context, store imageStore, item model.Media) (MediaAccess, error) {
 	url, expiresAt, err := store.SignedURL(ctx, item.ObjectKey, "")
 	if err != nil {
 		return MediaAccess{}, fmt.Errorf("生成图片访问地址失败: %w", err)
 	}
-	previewURL, _, err := store.SignedURL(ctx, item.ObjectKey, mediaPreviewProcess)
+	process := mediaPreviewProcess
+	video := strings.HasPrefix(item.ContentType, "video/")
+	if video {
+		process = videoSnapshotProcess(item.Duration)
+	}
+	previewURL, _, err := store.SignedURL(ctx, item.ObjectKey, process)
 	if err != nil {
-		return MediaAccess{}, fmt.Errorf("生成图片预览地址失败: %w", err)
+		if !video {
+			return MediaAccess{}, fmt.Errorf("生成图片预览地址失败: %w", err)
+		}
+		previewURL = ""
+		log.Printf("video preview signing failed media_id=%s", item.ID)
 	}
 	if _, local := store.(localImageStore); local {
 		url = "/api/v1/media/" + item.ID + "/content"
 		previewURL = url
+		if video {
+			previewURL = ""
+		}
 	}
-	return MediaAccess{MediaID: item.ID, URL: url, PreviewURL: previewURL, ExpiresAt: expiresAt, MediaExpiresAt: item.ExpiresAt, ContentType: item.ContentType, Bytes: item.Bytes, Width: item.Width, Height: item.Height}, nil
+	return MediaAccess{Duration: item.Duration, MediaID: item.ID, URL: url, PreviewURL: previewURL, ExpiresAt: expiresAt, MediaExpiresAt: item.ExpiresAt, ContentType: item.ContentType, Bytes: item.Bytes, Width: item.Width, Height: item.Height}, nil
 }
 
-func OpenLocalMedia(ctx context.Context, user PortalUser, id string) (io.ReadCloser, string, error) {
+func OpenLocalMedia(ctx context.Context, user PortalUser, id string) (result io.ReadCloser, contentType string, resultErr error) {
+	defer func() { auditMediaAccessFailure(model.Media{ID: id}, user.UID, resultErr) }()
 	item, found, err := repository.GetMedia(id)
 	if err != nil {
 		return nil, "", err

@@ -24,6 +24,7 @@ type Media struct {
 	ObjectKey         string             `json:"-" gorm:"uniqueIndex"`
 	ContentType       string             `json:"contentType"`
 	Bytes             int64              `json:"bytes"`
+	Duration          float64            `json:"duration"`
 	Width             int                `json:"width"`
 	Height            int                `json:"height"`
 	Filename          string             `json:"filename"`

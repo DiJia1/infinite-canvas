@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,6 +19,7 @@ import (
 )
 
 const maxCanvasShareRecipients = 50
+const canvasShareTimeout = 105 * time.Second
 
 type CanvasShareInput struct {
 	Revision          int      `json:"revision"`
@@ -63,6 +65,8 @@ func ListCanvasShareRecipients(senderUID string, query model.PortalMemberQuery) 
 }
 
 func ShareCanvasProject(ctx context.Context, user PortalUser, sourceID string, input CanvasShareInput) (CanvasShareResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, canvasShareTimeout)
+	defer cancel()
 	if strings.TrimSpace(user.UID) == "" {
 		return CanvasShareResult{}, canvasProjectValidationError{message: "未经过 Portal Gateway 身份验证"}
 	}
@@ -91,6 +95,10 @@ func ShareCanvasProject(ctx context.Context, user PortalUser, sourceID string, i
 	var store imageStore
 	result := CanvasShareResult{Deliveries: make([]CanvasShareDelivery, 0, len(recipients))}
 	for _, recipient := range recipients {
+		if ctx.Err() != nil {
+			result.Deliveries = append(result.Deliveries, CanvasShareDelivery{RecipientUserUID: recipient.UserUID, Status: "failed", Message: "分享等待超时，请重试检查原分享结果"})
+			continue
+		}
 		projectID := canvasShareProjectID(source.ID, source.Revision, recipient.UserUID)
 		if existing, found, err := repository.GetCanvasProject(recipient.UserUID, projectID); err != nil {
 			return CanvasShareResult{}, err
@@ -106,7 +114,12 @@ func ShareCanvasProject(ctx context.Context, user PortalUser, sourceID string, i
 		}
 		project, err := copyCanvasShareProject(ctx, store, source, document, media, recipient, projectID, user)
 		if err != nil {
-			result.Deliveries = append(result.Deliveries, CanvasShareDelivery{RecipientUserUID: recipient.UserUID, Status: "failed", Message: "分享失败，请稍后重试"})
+			message := "分享失败，请稍后重试"
+			if ctx.Err() != nil {
+				message = "分享等待超时，请重试检查原分享结果"
+			}
+			log.Printf("canvas share failed project_id=%s recipient_uid=%s: %v", source.ID, recipient.UserUID, err)
+			result.Deliveries = append(result.Deliveries, CanvasShareDelivery{RecipientUserUID: recipient.UserUID, Status: "failed", Message: message})
 			continue
 		}
 		result.Deliveries = append(result.Deliveries, CanvasShareDelivery{RecipientUserUID: recipient.UserUID, ProjectID: project.ID, Status: "shared"})
@@ -151,14 +164,14 @@ func canvasShareDocument(raw model.CanvasProjectDocument) (map[string]any, []str
 	for _, item := range nodes {
 		node, _ := item.(map[string]any)
 		typeName, _ := node["type"].(string)
-		if typeName == "video" {
-			return nil, nil, canvasProjectValidationError{message: "画布包含视频，暂不支持分享"}
-		}
-		if typeName != "image" {
+		if typeName != "image" && typeName != "video" {
 			continue
 		}
 		metadata, _ := node["metadata"].(map[string]any)
 		mediaID, _ := metadata["mediaId"].(string)
+		if typeName == "video" && (strings.TrimSpace(mediaID) == "" || metadata["status"] == "loading") {
+			return nil, nil, canvasProjectValidationError{message: "请先完成视频上传或生成，再分享画布"}
+		}
 		if strings.TrimSpace(mediaID) == "" {
 			return nil, nil, canvasProjectValidationError{message: "画布包含无法复制的图片"}
 		}
@@ -180,14 +193,14 @@ func canvasShareSourceMedia(user PortalUser, ids []string) (map[string]model.Med
 			return nil, err
 		}
 		if !found || item.CleanupStatus == model.MediaCleanupDeleting {
-			return nil, canvasProjectValidationError{message: "画布图片不存在"}
+			return nil, canvasProjectValidationError{message: "画布素材不存在"}
 		}
 		_, public, err := repository.GetPublicImageByMediaID(item.ID)
 		if err != nil {
 			return nil, err
 		}
 		if item.OwnerUID != user.UID && !public {
-			return nil, canvasProjectValidationError{message: "画布包含无权分享的图片"}
+			return nil, canvasProjectValidationError{message: "画布包含无权分享的素材"}
 		}
 		items[id] = item
 	}
@@ -231,12 +244,18 @@ func copyCanvasShareProject(ctx context.Context, store imageStore, source model.
 		return model.CanvasProject{}, err
 	}
 	item := model.CanvasProject{ID: projectID, OwnerUID: recipient.UserUID, Title: canvasShareTitle(source.Title, PortalDisplayName(sender)), Document: model.CanvasProjectDocument(encoded), Revision: 1, CreatedAt: now(), UpdatedAt: now()}
-	createdProject, inserted, err := repository.CreateCanvasProject(item)
-	if err != nil || !inserted {
+	if err := ctx.Err(); err != nil {
 		cleanupCanvasShareMedia(ctx, store, created)
-		if err != nil {
-			return model.CanvasProject{}, err
-		}
+		return model.CanvasProject{}, err
+	}
+	createdProject, inserted, err := repository.CreateCanvasProject(item, ctx)
+	if err != nil {
+		// A commit response can be lost. Keep tracked copies until the retention worker
+		// checks persisted references, rather than deleting a possibly published result.
+		return model.CanvasProject{}, err
+	}
+	if !inserted {
+		cleanupCanvasShareMedia(ctx, store, created)
 		return createdProject, nil
 	}
 	return createdProject, nil
@@ -255,6 +274,39 @@ func cloneCanvasShareDocument(source map[string]any) (map[string]any, error) {
 }
 
 func copyCanvasShareMedia(ctx context.Context, store imageStore, source model.Media, recipientUID string) (model.Media, error) {
+	if err := ctx.Err(); err != nil {
+		return model.Media{}, err
+	}
+	// Unpublished copies remain eligible for the existing media cleanup worker after a crash.
+	expiresAt := time.Now().Add(24 * time.Hour)
+	if strings.HasPrefix(source.ContentType, "video/") {
+		if source.ContentType != "video/mp4" {
+			return model.Media{}, errors.New("仅支持分享 MP4 视频")
+		}
+		metadata, err := store.Head(ctx, source.ObjectKey)
+		if err != nil {
+			return model.Media{}, err
+		}
+		if metadata.Bytes <= 0 || metadata.Bytes > maxMediaBytes {
+			return model.Media{}, errors.New("分享视频大小无效，最大 50 MB")
+		}
+		copier, ok := store.(interface {
+			Copy(context.Context, string, string) error
+		})
+		if !ok {
+			return model.Media{}, errors.New("当前存储不支持视频复制")
+		}
+		key := privateImageObjectKey(recipientUID, model.MediaSourceUpload, "mp4", time.Now())
+		item := model.Media{ID: newID("media"), OwnerUID: recipientUID, Source: model.MediaSourceUpload, ObjectKey: key, ContentType: source.ContentType, Bytes: metadata.Bytes, Width: source.Width, Height: source.Height, Duration: source.Duration, Filename: source.Filename, Title: source.Title, CreatedAt: now(), ExpiresAt: &expiresAt}
+		if _, err := repository.SaveMedia(item, ctx); err != nil {
+			return model.Media{}, err
+		}
+		if err := copier.Copy(ctx, source.ObjectKey, key); err != nil {
+			// A timed-out OSS copy may still finish. Retain its expiring record for deferred cleanup.
+			return model.Media{}, err
+		}
+		return item, nil
+	}
 	file, err := store.Get(ctx, source.ObjectKey)
 	if err != nil {
 		return model.Media{}, err
@@ -272,21 +324,31 @@ func copyCanvasShareMedia(ctx context.Context, store imageStore, source model.Me
 		return model.Media{}, errors.New("分享图片格式无效")
 	}
 	key := privateImageObjectKey(recipientUID, model.MediaSourceUpload, extension, time.Now())
-	if err := store.Put(ctx, key, data, source.ContentType); err != nil {
+	item := model.Media{ID: newID("media"), OwnerUID: recipientUID, Source: model.MediaSourceUpload, ObjectKey: key, ContentType: source.ContentType, Bytes: int64(len(data)), Width: source.Width, Height: source.Height, Filename: source.Filename, Title: source.Title, CreatedAt: now(), ExpiresAt: &expiresAt}
+	if _, err := repository.SaveMedia(item, ctx); err != nil {
 		return model.Media{}, err
 	}
-	item := model.Media{ID: newID("media"), OwnerUID: recipientUID, Source: model.MediaSourceUpload, ObjectKey: key, ContentType: source.ContentType, Bytes: int64(len(data)), Width: source.Width, Height: source.Height, Filename: source.Filename, Title: source.Title, CreatedAt: now()}
-	if _, err := repository.SaveMedia(item); err != nil {
-		_ = store.Delete(ctx, key)
+	if err := store.Put(ctx, key, data, source.ContentType); err != nil {
 		return model.Media{}, err
 	}
 	return item, nil
 }
 
 func cleanupCanvasShareMedia(ctx context.Context, store imageStore, items []model.Media) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	for _, item := range items {
-		_ = repository.DeleteMedia(item.ID)
-		_ = store.Delete(ctx, item.ObjectKey)
+		if cleanupCtx.Err() != nil {
+			return
+		}
+		if err := deleteImageObject(cleanupCtx, store, item.ObjectKey); err != nil {
+			auditMediaFailure(item, "", "delete_failed", "share_cleanup_failed")
+			log.Printf("canvas share cleanup object failed media_id=%s: %v", item.ID, err)
+			continue
+		}
+		if err := repository.DeleteMedia(item.ID, cleanupCtx); err != nil {
+			log.Printf("canvas share cleanup record failed media_id=%s: %v", item.ID, err)
+		}
 	}
 }
 
@@ -294,7 +356,7 @@ func rewriteCanvasShareMedia(document map[string]any, replacements map[string]st
 	nodes, _ := document["nodes"].([]any)
 	for _, item := range nodes {
 		node, _ := item.(map[string]any)
-		if node["type"] != "image" {
+		if node["type"] != "image" && node["type"] != "video" {
 			continue
 		}
 		metadata, _ := node["metadata"].(map[string]any)
@@ -304,7 +366,19 @@ func rewriteCanvasShareMedia(document map[string]any, replacements map[string]st
 			return errors.New("分享图片引用无效")
 		}
 		metadata["mediaId"] = targetID
-		metadata["storageKey"] = "media:" + targetID + ":v1:original"
+		if node["type"] == "video" {
+			for key := range metadata {
+				if strings.HasPrefix(key, "videoTask") {
+					delete(metadata, key)
+				}
+			}
+			for _, key := range []string{"storageKey", "content", "url", "previewUrl", "thumbnailUrl", "coverUrl", "access", "errorDetails"} {
+				delete(metadata, key)
+			}
+			metadata["status"] = "success"
+		} else {
+			metadata["storageKey"] = "media:" + targetID + ":v1:original"
+		}
 		delete(metadata, "mediaExpiresAt")
 		delete(metadata, "publicImageId")
 		delete(metadata, "assetId")

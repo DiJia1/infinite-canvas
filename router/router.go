@@ -51,7 +51,9 @@ func New() *gin.Engine {
 	v1.GET("/public-folders", gin.WrapF(handler.PublicFolders))
 	v1.GET("/public-images/:id/access", func(c *gin.Context) { handler.PublicImageAccess(c.Writer, c.Request, c.Param("id")) })
 	v1.GET("/public-images/:id/content", func(c *gin.Context) { handler.PublicImageContent(c.Writer, c.Request, c.Param("id")) })
+	v1.GET("/videos/by-client/:client", func(c *gin.Context) { handler.AIVideoByClient(c.Writer, c.Request, c.Param("client")) })
 	v1.POST("/videos", gin.WrapF(handler.AIVideos))
+	v1.POST("/videos/:id/resume", func(c *gin.Context) { handler.AIVideoResume(c.Writer, c.Request, c.Param("id")) })
 	v1.GET("/videos/:id", func(c *gin.Context) {
 		handler.AIVideo(c.Writer, c.Request, c.Param("id"))
 	})

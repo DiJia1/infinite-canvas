@@ -31,6 +31,7 @@ export type StatisticsUser = {
 };
 
 export type Statistics = {
+    video?: VideoStatistics;
     startDate: string;
     endDate: string;
     timezone: string;
@@ -44,3 +45,15 @@ export type Statistics = {
 export async function fetchStatistics(token: string, range: StatisticsRange) {
     return apiGet<Statistics>("/api/admin/statistics", range, token);
 }
+
+export type VideoStatisticsTotals = {
+    successfulCalls: number;
+    videoCount: number;
+    seconds: number;
+    amount: string;
+    upstreamCosts: Record<string, string>;
+};
+export type VideoStatisticsResolution = VideoStatisticsTotals & { resolution: string };
+export type VideoStatisticsModel = VideoStatisticsTotals & { providerId: string; providerName: string; resolutions: VideoStatisticsResolution[] };
+export type VideoStatisticsUser = VideoStatisticsTotals & { userUid: string; displayName: string; models: VideoStatisticsModel[] };
+export type VideoStatistics = VideoStatisticsTotals & { models: VideoStatisticsModel[]; users: VideoStatisticsUser[] };

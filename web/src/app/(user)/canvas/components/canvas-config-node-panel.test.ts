@@ -16,13 +16,13 @@ function elements(root: ReactNode): ReactElement<Record<string, any>>[] {
 test("model selector and popup stop canvas pointer events and forward the selected model", () => {
     const selected: string[] = [];
     const Select = "model-select";
-    const component = sourceBehavior(sourceURL, { Select }).named("CanvasConfigModelSelect");
+    const component = sourceBehavior(sourceURL, { CanvasSettingsSelect: Select }).named("CanvasConfigModelSelect");
     const root = component({ value: "a", options: [{ id: "a", name: "A" }, { id: "b", name: "B" }], onChange: (id: string) => selected.push(id) });
     const select = elements(root).find((node) => node.type === Select)!;
     assert.deepEqual(select.props.options, [{ value: "a", label: "A" }, { value: "b", label: "B" }]);
     select.props.onChange("b");
     assert.deepEqual(selected, ["b"]);
-    for (const surface of [root, select.props.popupRender("menu")]) {
+    for (const surface of [root]) {
         let stopped = 0;
         surface.props.onMouseDown({ stopPropagation: () => stopped++ });
         surface.props.onPointerDown({ stopPropagation: () => stopped++ });
@@ -92,7 +92,7 @@ test("preview editing isolates wheel and outside pointer events and removes list
         setPreviewOpen: (value: boolean) => closed.push(value),
         document: { addEventListener: (name: string, handler: (event: any) => void) => listeners.set(name, handler), removeEventListener: (name: string) => listeners.delete(name) },
     });
-    const dispose = source.select((node) => ts.isArrowFunction(node) && ts.isCallExpression(node.parent) && node.parent.expression.getText() === "useEffect")();
+    const dispose = source.select((node) => ts.isArrowFunction(node) && ts.isCallExpression(node.parent) && node.parent.expression.getText() === "useEffect" && node.getText().includes("stopCanvasWheel"))();
     let stops = 0;
     let prevented = 0;
     const event = { target: inside, preventDefault: () => prevented++, stopPropagation: () => stops++ };
@@ -129,4 +129,43 @@ test("changing generation mode updates the node used by generation configuration
     assert.equal(node.metadata?.imageProviderType, "test-provider");
     assert.equal(node.metadata?.imageRequestSchemaVersion, "v2");
     assert.equal(buildGenerationConfig(config, node, defaultConfig).imageProviderId, "new");
+});
+
+test("layout height follows content wrapping without using scaled screen dimensions and disconnects on unmount", () => {
+    const layout = { offsetHeight: 270 };
+    const heights: number[] = [];
+    let resized = () => {};
+    let disconnected = false;
+    const source = sourceBehavior(sourceURL, {
+        node: { id: "config" },
+        layoutRef: { current: layout },
+        onLayoutHeightChange: (id: string, height: number) => {
+            assert.equal(id, "config");
+            heights.push(height);
+        },
+        ResizeObserver: class {
+            constructor(callback: () => void) { resized = callback; }
+            observe(target: unknown) { assert.equal(target, layout); }
+            disconnect() { disconnected = true; }
+        },
+    });
+    const dispose = source.select((node) => ts.isArrowFunction(node) && ts.isCallExpression(node.parent) && node.parent.expression.getText() === "useLayoutEffect")();
+    assert.deepEqual(heights, [274]);
+    layout.offsetHeight = 304;
+    resized();
+    assert.deepEqual(heights, [274, 308]);
+    dispose();
+    assert.equal(disconnected, true);
+});
+
+test("opening input preview registers media targets and closing releases them", () => {
+    const targets: unknown[] = [];
+    const source = sourceBehavior(sourceURL, {
+        previewOpen: true, node: { id: "config" }, previewImageIds: JSON.stringify(["image-a", "image-b"]),
+        onPreviewImagesChange: (...args: unknown[]) => targets.push(args),
+    });
+    const dispose = source.select((node) => ts.isArrowFunction(node) && ts.isCallExpression(node.parent) && node.parent.expression.getText() === "useEffect" && node.getText().includes("JSON.parse(previewImageIds)"))();
+    assert.deepEqual(targets, [["config", ["image-a", "image-b"]]]);
+    dispose();
+    assert.deepEqual(targets[1], ["config", []]);
 });

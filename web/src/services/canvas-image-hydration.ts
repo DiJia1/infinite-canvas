@@ -64,6 +64,7 @@ export async function hydrateCanvasImages(
             if (options.shouldHydrate && !options.shouldHydrate(node)) return node;
             const metadata = node.metadata;
             const content = metadata?.content;
+            if (node.type === "video" && metadata?.mediaId) return node;
             if (node.type === "video" && metadata?.storageKey) {
                 return { ...node, metadata: { ...metadata, content: await dependencies.resolveMediaUrl(metadata.storageKey, content || "") } };
             }

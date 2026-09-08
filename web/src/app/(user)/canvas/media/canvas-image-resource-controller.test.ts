@@ -190,3 +190,49 @@ test("failed image loads expose an error without an automatic retry loop", async
     assert.equal(controller.errors().size, 0);
     controller.dispose();
 });
+
+test("same resource remains in memory for preview and is released after its final target disappears", async () => {
+    let loads = 0;
+    const released: string[] = [];
+    const controller = createCanvasImageResourceController({ queue: createCanvasMediaLoadQueue({ concurrency: 1 }), releaseObjectURL: key => released.push(key), deferRelease: fn => fn() });
+    const loaders = { thumbnail: async () => { loads++; return image("thumbnail"); }, original: async () => image("original") };
+    controller.reconcile([request("thumbnail", loaders)]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    controller.reconcile([{ ...request("thumbnail", loaders), priority: "interactive" }]);
+    assert.equal(loads, 1);
+    assert.deepEqual(released, []);
+    controller.reconcile([]);
+    assert.deepEqual(released, [image("thumbnail").storageKey]);
+    controller.dispose();
+});
+
+test("failed loads wait for explicit retry and then recover", async () => {
+    let attempts = 0;
+    const controller = createCanvasImageResourceController({ queue: createCanvasMediaLoadQueue({ concurrency: 1 }), releaseObjectURL: () => {} });
+    const loaders = { thumbnail: async () => { if (++attempts === 1) throw new Error("offline"); return image("thumbnail"); }, original: async () => image("original") };
+    controller.reconcile([request("thumbnail", loaders)]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(controller.errors().get("node-1"), "offline");
+    controller.reconcile([request("thumbnail", loaders)]);
+    assert.equal(attempts, 1);
+    controller.retry("node-1");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(attempts, 2);
+    assert.equal(controller.errors().size, 0);
+    assert.equal(controller.get("node-1")?.url, "blob:thumbnail");
+    controller.dispose();
+});
+
+test("reusing a node id for different media cannot display the previous resource", async () => {
+    const controller = createCanvasImageResourceController({ queue: createCanvasMediaLoadQueue({ concurrency: 1 }), releaseObjectURL: () => {} });
+    const loaders = { thumbnail: async () => image("thumbnail"), original: async () => image("original") };
+    controller.reconcile([request("thumbnail", loaders)]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const replacement = deferred<UploadedImage>();
+    controller.reconcile([{ ...request("thumbnail", loaders), mediaId: "two", loadThumbnail: () => replacement.promise }]);
+    assert.equal(controller.get("node-1"), undefined);
+    replacement.resolve({ ...image("thumbnail"), mediaId: "two", storageKey: "media:two:thumbnail", url: "blob:two" });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(controller.get("node-1")?.mediaId, "two");
+    controller.dispose();
+});

@@ -98,7 +98,11 @@ func MediaAccess(w http.ResponseWriter, r *http.Request, id string) {
 		Fail(w, "未经过 Portal Gateway 身份验证")
 		return
 	}
-	result, err := service.MediaAccessURL(r.Context(), user, id)
+	var download []string
+	if r.URL.Query().Get("download") == "1" {
+		download = []string{r.URL.Query().Get("filename")}
+	}
+	result, err := service.MediaAccessURL(r.Context(), user, id, download...)
 	if err != nil {
 		FailError(w, err)
 		return
@@ -273,6 +277,9 @@ func LocalMediaContent(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	defer file.Close()
 	w.Header().Set("Content-Type", contentType)
+	if r.URL.Query().Get("download") == "1" && strings.HasPrefix(contentType, "video/") {
+		w.Header().Set("Content-Disposition", service.VideoDownloadDisposition(r.URL.Query().Get("filename")))
+	}
 	_, _ = io.Copy(w, file)
 }
 

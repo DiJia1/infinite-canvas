@@ -214,7 +214,18 @@ func normalizeImageTaskRequestForProvider(provider model.AIProvider, request Cre
 	if !ok {
 		return CreateImageTaskRequest{}, safeMessageError{message: "当前供应商未实现请求参数适配"}
 	}
-	normalized, err := adapter.NormalizeImageTaskRequest(ai.ImageTaskRequest{Request: request.Request, References: request.References, Mask: request.Mask})
+	var configuredSchema *ai.ImageRequestSchema
+	if typeInfo.ImageRequestSchema != nil && len(provider.AspectRatios) > 0 {
+		schema := configuredImageRequestSchema(provider, *typeInfo.ImageRequestSchema)
+		// Keep resolution validation and its existing price error in the service.
+		for index, field := range typeInfo.ImageRequestSchema.Fields {
+			if field.Key != "size" {
+				schema.Fields[index] = field
+			}
+		}
+		configuredSchema = &schema
+	}
+	normalized, err := adapter.NormalizeImageTaskRequest(ai.ImageTaskRequest{Request: request.Request, References: request.References, Mask: request.Mask, RequestSchema: configuredSchema})
 	if err != nil {
 		return CreateImageTaskRequest{}, err
 	}
@@ -305,6 +316,9 @@ func configuredImageTaskProvider(settings model.AISettings, mode, requestedProvi
 			return model.AIProvider{}, safeMessageError{message: "当前图片模型不支持图像编辑"}
 		}
 		return model.AIProvider{}, safeMessageError{message: "当前模型不支持此能力"}
+	}
+	if requiresImageAspectRatios(typeInfo) && len(provider.AspectRatios) == 0 {
+		return model.AIProvider{}, safeMessageError{message: "当前模型待配置，请管理员添加比例"}
 	}
 	return provider, nil
 }

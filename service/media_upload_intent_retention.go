@@ -26,7 +26,21 @@ func CleanupExpiredMediaUploadIntents(current time.Time) error {
 		if err := deleteImageObject(context.Background(), store, item.ObjectKey); err != nil {
 			return err
 		}
+		if item.FinalObjectKey != "" {
+			if err := deleteImageObject(context.Background(), store, item.FinalObjectKey); err != nil {
+				return err
+			}
+		}
 		if err := repository.DeleteMediaUploadIntent(item.ID); err != nil {
+			return err
+		}
+	}
+	completedVideos, err := repository.ListExpiredVideoUploadIntents(current.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	for _, item := range completedVideos {
+		if err := deleteImageObject(context.Background(), store, item.ObjectKey); err != nil {
 			return err
 		}
 	}

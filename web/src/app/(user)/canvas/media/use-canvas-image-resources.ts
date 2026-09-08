@@ -16,6 +16,7 @@ export type CanvasMediaTarget = {
     visible: boolean;
     pinned: boolean;
     prefetch: boolean;
+    preview?: boolean;
 };
 
 function isRemoteImageNode(node: CanvasNodeData) {
@@ -26,10 +27,12 @@ export function buildCanvasMediaTargets({
     onScreenNodes,
     prefetchNodes,
     pinnedNodes,
+    previewNodes = [],
 }: {
     onScreenNodes: CanvasNodeData[];
     prefetchNodes: CanvasNodeData[];
     pinnedNodes: CanvasNodeData[];
+    previewNodes?: CanvasNodeData[];
 }): CanvasMediaTarget[] {
     const targets = new Map<string, CanvasMediaTarget>();
 
@@ -45,6 +48,11 @@ export function buildCanvasMediaTargets({
         targets.set(node.id, current ? { ...current, node, pinned: true } : { node, visible: false, pinned: true, prefetch: false });
     });
 
+    previewNodes.forEach((node) => {
+        if (!isRemoteImageNode(node)) return;
+        const current = targets.get(node.id);
+        targets.set(node.id, current ? { ...current, preview: true } : { node, visible: false, pinned: false, prefetch: false, preview: true });
+    });
     return [...targets.values()];
 }
 
@@ -71,11 +79,11 @@ export function useCanvasImageResources({ targets, scale, resolveAccess }: { tar
 
     const requests = useMemo(
         () =>
-            targets.flatMap(({ node, visible, pinned, prefetch }) => {
+            targets.flatMap(({ node, visible, pinned, prefetch, preview }) => {
                 const mediaId = node.type === "image" ? node.metadata?.mediaId : undefined;
                 if (!mediaId) return [];
                 const current = controller.get(node.id);
-                const variant = prefetch && !visible && !pinned ? "thumbnail" : getCanvasImageVariant({ visible, width: node.width, height: node.height, scale, pinned, currentVariant: current?.variant });
+                const variant = preview ? (current?.mediaId === mediaId ? current.variant : "thumbnail") : prefetch && !visible && !pinned ? "thumbnail" : getCanvasImageVariant({ visible, width: node.width, height: node.height, scale, pinned, currentVariant: current?.variant });
                 if (variant === "none") return [];
                 const remoteURL = async (kind: "thumbnail" | "original") => {
                     const access = await resolveAccess(node);
@@ -86,9 +94,9 @@ export function useCanvasImageResources({ targets, scale, resolveAccess }: { tar
                         nodeId: node.id,
                         mediaId,
                         variant,
-                        priority: pinned ? ("interactive" as const) : prefetch && !visible ? ("prefetch" as const) : variant === "original" ? ("visible-original" as const) : ("visible-thumbnail" as const),
+                        priority: pinned || preview ? ("interactive" as const) : prefetch && !visible ? ("prefetch" as const) : variant === "original" ? ("visible-original" as const) : ("visible-thumbnail" as const),
                         releaseOriginalAfterThumbnail: Boolean(node.metadata?.content?.startsWith("blob:")),
-                        loadThumbnail: (signal: AbortSignal) => loadMediaThumbnail(mediaId, () => remoteURL("thumbnail"), { signal, preferRemoteThumbnail: true, maxThumbnailEdge: 512 }),
+                        loadThumbnail: (signal: AbortSignal) => loadMediaThumbnail(mediaId, () => remoteURL("thumbnail"), { signal, preferRemoteThumbnail: !preview, maxThumbnailEdge: 512 }),
                         loadOriginal: (signal: AbortSignal) => loadMediaImage(mediaId, () => remoteURL("original"), { signal }),
                     },
                 ];
@@ -110,5 +118,6 @@ export function useCanvasImageResources({ targets, scale, resolveAccess }: { tar
     const resources = useMemo(() => controller.snapshot(), [controller, version]);
     const acknowledgeRendered = useCallback((nodeId: string, storageKey: string) => controller.acknowledgeRendered(nodeId, storageKey), [controller]);
 
-    return { resources, errors: controller.errors(), acknowledgeRendered };
+    const retry = useCallback((nodeId: string) => controller.retry(nodeId), [controller]);
+    return { resources, errors: controller.errors(), acknowledgeRendered, retry };
 }

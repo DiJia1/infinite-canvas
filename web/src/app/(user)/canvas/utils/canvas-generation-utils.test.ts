@@ -269,8 +269,10 @@ test("falls back to supplied defaults when generation config is empty", () => {
         resolution: "2k",
         outputFormat: "jpeg",
         background: "auto",
+        videoSize: "",
+        generateAudio: "false",
         videoSeconds: "8",
-        vquality: "1080",
+        vquality: "",
         count: "4",
     });
 });
@@ -344,4 +346,18 @@ test("formats positive and negative angle labels and includes them in prompts", 
     assert.equal(buildAngleLabel(positive), "AI 多角度：向右旋转 30 度，俯视 15 度，镜头距离 4.8，广角镜头");
     assert.equal(buildAngleLabel(negative), "AI 多角度：向左旋转 30 度，仰视 15 度，镜头距离 4.8，标准镜头");
     assert.match(buildAnglePrompt(positive), /AI 多角度：向右旋转 30 度，俯视 15 度，镜头距离 4.8，广角镜头/);
+});
+
+test("video config null survives document roundtrip instead of inheriting a global value", () => {
+    const item = JSON.parse(JSON.stringify({ id: "video-config", type: CanvasNodeType.Config, position: { x: 10, y: 20 }, width: 360, height: 300, metadata: { vquality: null, videoProviderId: "video" } }));
+    assert.equal(buildGenerationConfig({ ...config, vquality: "720p" }, item, fallbackConfig).vquality, null);
+});
+
+test("loaded video model options initialize old nodes once and preserve valid selections", () => {
+    const status = { videoModels: [{ id: "video", name: "Video", type: "video", videoRequestSchema: { resolutions: [{value:"480p",label:"480p",price:"0.1"},{value:"720p",label:"720p",price:"0.2"}],aspectRatios:[],minDuration:4,maxDuration:15,defaultDuration:5,maxReferenceImages:9,maxReferenceVideos:3,maxReferenceVideoDuration:15 } }] };
+    const nodes = ["720", "720p"].map((vquality, i) => ({ id: `config-${i}`, title: "Config", type: CanvasNodeType.Config, position: {x:0,y:0}, width:360,height:300,metadata:{videoProviderId:"video",vquality} }));
+    const next = snapshotConfigNodeProviderSelection(nodes, config, status);
+    assert.equal(next[0].metadata?.vquality,"480p");
+    assert.equal(next[1].metadata?.vquality,"720p");
+    assert.equal(snapshotConfigNodeProviderSelection(next,config,status),next);
 });

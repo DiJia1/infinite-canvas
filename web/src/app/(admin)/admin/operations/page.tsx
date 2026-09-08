@@ -5,11 +5,23 @@ import { Empty, Input, Pagination, Select, Spin, Tag } from "antd";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useDeferredValue, useEffect, useState } from "react";
 
+import { formatCNYAmount } from "@/lib/money";
 import { fetchOperationLogs, type OperationLog } from "@/services/api/operation-logs";
 
 const PAGE_SIZE = 20;
+const videoStatusLabels: Record<string, string> = { queued: "排队中", submitting: "提交中", running: "生成中", saving: "保存中", paused: "已暂停", uncertain: "结果不确定", succeeded: "已完成", failed: "任务失败" };
 
 const actionLabels: Record<string, string> = {
+    media_created: "资源创建",
+    media_reference_added: "加入画布",
+    media_reference_removed: "移出画布",
+    media_cleanup_scheduled: "进入待清理",
+    media_cleanup_cancelled: "取消清理",
+    media_cleanup_started: "开始清理",
+    media_delete_requested: "申请删除资源",
+    media_deleted: "资源已删除",
+    media_delete_failed: "资源删除失败",
+    media_access_failed: "资源访问失败",
     image_generate: "图片生成",
     image_edit: "图片编辑",
     video_generate: "视频生成",
@@ -28,7 +40,11 @@ const actionLabels: Record<string, string> = {
 };
 
 export default function AdminOperationsPage() {
-    return <Suspense><AdminOperationsContent /></Suspense>;
+    return (
+        <Suspense>
+            <AdminOperationsContent />
+        </Suspense>
+    );
 }
 
 function AdminOperationsContent() {
@@ -39,7 +55,9 @@ function AdminOperationsContent() {
     const [status, setStatus] = useState("");
     const [actor, setActor] = useState(actorFromMember);
     const deferredActor = useDeferredValue(actor);
-    const query = useQuery({ queryKey: ["operation-logs", page, action, status, deferredActor], queryFn: () => fetchOperationLogs({ page, pageSize: PAGE_SIZE, action, status, actor: deferredActor }) });
+    const [mediaId, setMediaId] = useState(searchParams.get("mediaId") || "");
+    const deferredMediaId = useDeferredValue(mediaId);
+    const query = useQuery({ queryKey: ["operation-logs", page, action, status, deferredActor, deferredMediaId], queryFn: () => fetchOperationLogs({ page, pageSize: PAGE_SIZE, action, status, actor: deferredActor, mediaId: deferredMediaId }), refetchInterval: 5000 });
 
     useEffect(() => {
         setPage(1);
@@ -56,11 +74,12 @@ function AdminOperationsContent() {
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                     <h1 className="text-xl font-semibold">操作记录</h1>
-                    <p className="mt-1 text-sm text-stone-500 dark:text-stone-400">仅保留最近 7 天的可信服务端操作。</p>
+                    <p className="mt-1 text-sm text-stone-500 dark:text-stone-400">图片生命周期保留 30 天，其他操作保留 7 天。重复资源错误每 30 分钟合并记录。</p>
                 </div>
             </div>
             <div className="flex flex-wrap gap-3">
                 <Input.Search value={actor} allowClear placeholder="按用户姓名或 UID 搜索" className="w-60" onChange={(event) => updateFilter(setActor, event.target.value)} />
+                <Input.Search value={mediaId} allowClear placeholder="按完整图片 / 资源 ID 查询" className="w-72" onChange={(event) => updateFilter(setMediaId, event.target.value)} />
                 <Select value={action || undefined} allowClear className="w-40" placeholder="全部操作" onChange={(value) => updateFilter(setAction, value || "")} options={Object.entries(actionLabels).map(([value, label]) => ({ value, label }))} />
                 <Select
                     value={status || undefined}
@@ -68,11 +87,7 @@ function AdminOperationsContent() {
                     className="w-32"
                     placeholder="全部状态"
                     onChange={(value) => updateFilter(setStatus, value || "")}
-                    options={[
-                        { value: "submitted", label: "已提交" },
-                        { value: "success", label: "成功" },
-                        { value: "failure", label: "失败" },
-                    ]}
+                    options={[{ value: "submitted", label: "已提交" }, { value: "success", label: "成功" }, { value: "failure", label: "失败" }, ...Object.entries(videoStatusLabels).map(([value, label]) => ({ value, label: `视频 · ${label}` }))]}
                 />
             </div>
             {query.isLoading ? (
@@ -102,16 +117,28 @@ function OperationLogItem({ item }: { item: OperationLog }) {
                         <span className="font-medium">{item.actorName}</span>
                         <span className="text-sm text-stone-500 dark:text-stone-400">{actionLabels[item.action] || item.action}</span>
                         <OperationStatusTag status={item.status} />
+                        {item.video ? <Tag>{videoStatusLabels[item.video.status] || item.video.status}</Tag> : null}
                     </div>
+                    {item.targetType === "media_lifecycle" ? <p className="mt-1 break-all font-mono text-xs text-stone-500">资源 ID：{item.targetId}</p> : null}
                     {item.targetName ? <p className="mt-1 text-sm text-stone-500 dark:text-stone-400">{item.targetName}</p> : null}
                     {item.providerTaskId ? <p className="mt-1 break-all font-mono text-xs text-stone-500 dark:text-stone-400">上游任务 ID：{item.providerTaskId}</p> : null}
+                    {item.video ? (
+                        <div className="mt-2 space-y-1 text-xs text-stone-500 dark:text-stone-400">
+                            <p>
+                                {item.video.providerName || item.video.providerId} · {item.video.resolution} · {item.video.size} · {item.video.seconds} 秒 · 音频{item.video.generateAudio ? "开启" : "关闭"} · 费用快照 {formatCNYAmount(item.video.amount)}
+                            </p>
+                            <p className="break-all font-mono">
+                                模型 ID：{item.video.providerId} · 本地任务 ID：{item.video.taskId}
+                            </p>
+                        </div>
+                    ) : null}
                     {item.prompt ? (
                         <details className="mt-2 text-sm">
                             <summary className="cursor-pointer text-stone-500 dark:text-stone-400">查看完整提示词</summary>
                             <p className="mt-2 whitespace-pre-wrap break-words rounded bg-stone-50 p-3 text-stone-700 dark:bg-stone-900 dark:text-stone-200">{item.prompt}</p>
                         </details>
                     ) : null}
-                    {item.requestSummary ? <OperationRequestSummary summary={item.requestSummary} /> : null}
+                    {item.requestSummary ? <OperationRequestSummary summary={item.requestSummary} lifecycle={item.targetType === "media_lifecycle"} /> : null}
                     {item.errorMessage ? <p className="mt-2 text-sm text-red-600 dark:text-red-400">{item.errorMessage}</p> : null}
                 </div>
                 <time className="shrink-0 text-xs text-stone-500 dark:text-stone-400">{new Date(item.createdAt).toLocaleString()}</time>
@@ -126,7 +153,7 @@ function OperationStatusTag({ status }: { status: OperationLog["status"] }) {
     return <Tag color="red">失败</Tag>;
 }
 
-function OperationRequestSummary({ summary }: { summary: string }) {
+function OperationRequestSummary({ summary, lifecycle = false }: { summary: string; lifecycle?: boolean }) {
     let content = summary;
     try {
         content = JSON.stringify(JSON.parse(summary), null, 2);
@@ -135,7 +162,7 @@ function OperationRequestSummary({ summary }: { summary: string }) {
     }
     return (
         <details className="mt-2 text-sm">
-            <summary className="cursor-pointer text-stone-500 dark:text-stone-400">查看请求参数</summary>
+            <summary className="cursor-pointer text-stone-500 dark:text-stone-400">{lifecycle ? "查看生命周期详情" : "查看请求参数"}</summary>
             <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded bg-stone-50 p-3 text-xs text-stone-700 dark:bg-stone-900 dark:text-stone-200">{content}</pre>
         </details>
     );

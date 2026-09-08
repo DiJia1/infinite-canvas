@@ -568,7 +568,7 @@ func TestPromoteLegacyCanvasTemporaryMediaKeepsObjectKey(t *testing.T) {
 
 func TestImageGenerationCreatesPersistentTaskWithoutForwardingModel(t *testing.T) {
 	if _, err := service.SaveSettings(model.Settings{AI: model.AISettings{
-		Providers:       []model.AIProvider{{ID: "async-maizi", Name: "Maizi", Type: "maizi-image", Enabled: true, ImagePrices: []model.ImageResolutionPrice{{Resolution: "1k", Amount: decimal.RequireFromString("0.1234")}, {Resolution: "2k", Amount: decimal.RequireFromString("0.4567")}}, Config: json.RawMessage(`{"apiKey":"test-key","model":"gpt-image-2"}`)}},
+		Providers:       []model.AIProvider{{ID: "async-maizi", Name: "Maizi", Type: "maizi-image", Enabled: true, AspectRatios: []string{"1:1", "16:9"}, ImagePrices: []model.ImageResolutionPrice{{Resolution: "1k", Amount: decimal.RequireFromString("0.1234")}, {Resolution: "2k", Amount: decimal.RequireFromString("0.4567")}}, Config: json.RawMessage(`{"apiKey":"test-key","model":"gpt-image-2"}`)}},
 		ImageProviderID: "async-maizi",
 	}}); err != nil {
 		t.Fatal(err)
@@ -616,7 +616,7 @@ func TestImageGenerationCreatesPersistentTaskWithoutForwardingModel(t *testing.T
 
 func TestImageEditPersistsPNGMaskAndOutputSnapshot(t *testing.T) {
 	if _, err := service.SaveSettings(model.Settings{AI: model.AISettings{
-		Providers:       []model.AIProvider{{ID: "async-maizi-mask", Name: "Maizi", Type: "maizi-image", Enabled: true, ImagePrices: []model.ImageResolutionPrice{{Resolution: "2K", Amount: decimal.Zero}}, Config: json.RawMessage(`{"apiKey":"test-key","model":"gpt-image-2"}`)}},
+		Providers:       []model.AIProvider{{ID: "async-maizi-mask", Name: "Maizi", Type: "maizi-image", Enabled: true, AspectRatios: []string{"1:1", "16:9"}, ImagePrices: []model.ImageResolutionPrice{{Resolution: "2K", Amount: decimal.Zero}}, Config: json.RawMessage(`{"apiKey":"test-key","model":"gpt-image-2"}`)}},
 		ImageProviderID: "async-maizi-mask",
 	}}); err != nil {
 		t.Fatal(err)

@@ -2,6 +2,9 @@ package repository
 
 import (
 	"errors"
+	"github.com/google/uuid"
+	"gorm.io/gorm/clause"
+	"time"
 
 	"github.com/basketikun/infinite-canvas/model"
 	"gorm.io/gorm"
@@ -92,6 +95,57 @@ func DeletePublicImageAndMedia(publicImageID, mediaID string) error {
 		if err := tx.Delete(&model.PublicImage{}, "id = ?", publicImageID).Error; err != nil {
 			return err
 		}
-		return tx.Delete(&model.Media{}, "id = ?", mediaID).Error
+		var item model.Media
+		if err := tx.First(&item, "id = ?", mediaID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		if err := tx.Delete(&item).Error; err != nil {
+			return err
+		}
+		return recordMediaLifecycle(tx, item, "", "deleted", "", "public_resource_removed")
 	})
+}
+
+// Remove public discoverability under the media lock before external deletion.
+// Active video tasks keep their input even when an administrator deletes it.
+func PreparePublicImageDeletion(publicID string, current time.Time, actorUID ...string) (model.Media, error) {
+	db, err := DB()
+	if err != nil {
+		return model.Media{}, err
+	}
+	var media model.Media
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var public model.PublicImage
+		if err := tx.First(&public, "id = ?", publicID).Error; err != nil {
+			return err
+		}
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&media, "id = ?", public.MediaID).Error; err != nil {
+			return err
+		}
+		held, err := videoTaskReferences(tx, media.ID, current)
+		if err != nil {
+			return err
+		}
+		if held {
+			return errors.New("素材正在被视频任务使用")
+		}
+		media.CleanupStatus = model.MediaCleanupDeleting
+		media.CleanupClaimID = uuid.NewString()
+		until := current.Add(2 * time.Minute)
+		if err := tx.Model(&media).Updates(map[string]any{"cleanup_status": model.MediaCleanupDeleting, "cleanup_claim_id": media.CleanupClaimID, "cleanup_started_at": current, "cleanup_lease_until": until}).Error; err != nil {
+			return err
+		}
+		if err := tx.Delete(&public).Error; err != nil {
+			return err
+		}
+		actor := ""
+		if len(actorUID) > 0 {
+			actor = actorUID[0]
+		}
+		return recordMediaLifecycle(tx, media, actor, "delete_requested", "", "manual_public_delete")
+	})
+	return media, err
 }

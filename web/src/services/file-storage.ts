@@ -1,9 +1,10 @@
 "use client";
 
+import { uploadVideoMedia } from "./api/video-media";
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 
-export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number };
+export type UploadedFile = { mediaId?: string; duration?: number; url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number };
 
 type MediaFileStore = {
     getItem: (key: string) => Promise<Blob | null>;
@@ -76,7 +77,16 @@ export function createFileStorageOperations(store: MediaFileStore, urls = { crea
 }
 
 const store = localforage.createInstance({ name: "infinite-canvas", storeName: "media_files" });
-export const { uploadMediaFile, resolveMediaUrl, cleanupUnusedMedia } = createFileStorageOperations(store);
+const localFiles = createFileStorageOperations(store);
+export const { resolveMediaUrl, cleanupUnusedMedia } = localFiles;
+export async function uploadMediaFile(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
+    const blob = typeof input === "string" ? await (await fetch(input)).blob() : input;
+    if (prefix === "video" || blob.type.startsWith("video/")) {
+        const media = await uploadVideoMedia(blob);
+        return { url: media.url, storageKey: "", mediaId: media.mediaId, duration: media.duration, bytes: media.bytes, mimeType: media.contentType, width: media.width, height: media.height };
+    }
+    return localFiles.uploadMediaFile(blob, prefix);
+}
 
 export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()) {
     if (!value || typeof value !== "object") return keys;

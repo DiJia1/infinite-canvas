@@ -1,92 +1,92 @@
 import axios from "axios";
-
-import { dataUrlToFile } from "@/lib/image-utils";
-import { aiApiPath, apiRequestError, debugApiRequest } from "@/services/api/request";
-import { imageToDataUrl } from "@/services/image-storage";
+import { nanoid } from "nanoid";
+import { aiApiPath, apiRequestError } from "@/services/api/request";
 import type { AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 
-type VideoResponse = { id: string; status?: string; error?: { message?: string } };
-type ApiVideoResponse = VideoResponse | { code?: number; data?: VideoResponse | null; msg?: string };
+export type VideoGenerationTask = {
+    id: string;
+    status: "queued" | "submitting" | "running" | "saving" | "succeeded" | "failed" | "uncertain" | "paused";
+    progress: number;
+    error?: string;
+    resultMediaIds: string[];
+    videos: { mediaId: string; url: string; width?: number; height?: number; bytes?: number; contentType?: string; duration?: number }[];
+};
+export class VideoRequestRejectedError extends Error {}
+export class VideoQueryTransientError extends Error {}
 
-export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = []) {
-    const seconds = normalizeVideoSeconds(config.videoSeconds);
-    const size = normalizeVideoSize(config.size);
-    const resolutionName = normalizeVideoResolution(config.vquality);
-    const body = new FormData();
-	if (config.videoProviderId) body.append("providerId", config.videoProviderId);
-    body.append("prompt", prompt);
-    body.append("seconds", seconds);
-    if (size) body.append("size", size);
-    body.append("resolution_name", resolutionName);
-    body.append("preset", "normal");
-    const files = await Promise.all(references.slice(0, 7).map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
-    files.forEach((file) => body.append("input_reference[]", file));
-    debugApiRequest("video generation", {
-        url: aiApiPath("/videos"),
-        body: {
-            prompt,
-			...(config.videoProviderId ? { providerId: config.videoProviderId } : {}),
-            seconds,
-            ...(size ? { size } : {}),
-            resolution_name: resolutionName,
-            preset: "normal",
-        },
-        references: files.map((file) => ({ name: file.name, type: file.type, size: file.size })),
-    });
+function queryError(error: unknown, fallback: string): never {
+    if (axios.isCancel(error)) throw error;
+    if (axios.isAxiosError(error) && (!error.response || [408, 429].includes(error.response.status) || error.response.status >= 500)) {
+        throw new VideoQueryTransientError(["ECONNABORTED", "ETIMEDOUT"].includes(error.code || "") ? "请求超时，后台视频任务仍会继续，可重新查询" : "视频任务查询暂不可用，后台任务仍会继续，可重新查询");
+    }
+    throw new Error(apiRequestError(error, fallback));
+}
+
+function unwrap(payload: unknown): VideoGenerationTask {
+    if (!payload || typeof payload !== "object") throw new Error("接口没有返回视频任务");
+    const envelope = payload as { code?: number; msg?: string; data?: unknown };
+    if (typeof envelope.code === "number" && envelope.code !== 0) throw new VideoRequestRejectedError(envelope.msg || "视频请求失败");
+    const task = (envelope.data || payload) as VideoGenerationTask;
+    if (!task.id || !["queued", "submitting", "running", "saving", "succeeded", "failed", "uncertain", "paused"].includes(task.status)) throw new Error("接口返回无效视频任务");
+    return { ...task, resultMediaIds: task.resultMediaIds || [], videos: task.videos || [] };
+}
+export function validateVideoGeneration(config: AiConfig, references: ReferenceImage[] = [], videoMediaIds: string[] = []) {
+    const seconds = Number(config.videoSeconds);
+    if (!Number.isInteger(seconds) || seconds < 4 || seconds > 15) throw new Error("视频时长必须为 4 至 15 秒整数");
+    if (!config.videoSize || !config.vquality) throw new Error("请选择视频分辨率和比例");
+    if (references.length > 9 || videoMediaIds.length > 3) throw new Error("最多支持 9 张参考图和 3 个参考视频");
+    if (references.some((r) => !r.mediaId)) throw new Error("参考图片尚未上传完成，请等待上传完成后重试");
+    return seconds;
+}
+export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], clientRequestId = nanoid(), videoMediaIds: string[] = []): Promise<VideoGenerationTask> {
+    const seconds = validateVideoGeneration(config, references, videoMediaIds);
     try {
-        const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiPath("/videos"), body)).data);
-        if (!created.id) throw new Error("视频接口没有返回任务 ID");
-        for (;;) {
-            const video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(aiApiPath(`/videos/${created.id}`))).data);
-            if (video.status === "completed") break;
-            if (video.status === "failed" || video.status === "cancelled") throw new Error(video.error?.message || "视频生成失败");
-            await new Promise((resolve) => setTimeout(resolve, 2500));
-        }
-        const content = await axios.get<Blob>(aiApiPath(`/videos/${created.id}/content`), { responseType: "blob" });
-        await assertVideoBlob(content.data);
-        return content.data;
-    } catch (error) {
-        throw new Error(apiRequestError(error, "视频生成失败"));
+        return unwrap(
+            (
+                await axios.post(
+                    aiApiPath("/videos"),
+                    {
+                        clientRequestId,
+                        providerId: config.videoProviderId,
+                        prompt,
+                        seconds,
+                        size: config.videoSize,
+                        resolution: config.vquality,
+                        generateAudio: config.generateAudio === "true",
+                        imageMediaIds: references.map((r) => r.mediaId),
+                        videoMediaIds,
+                    },
+                    { timeout: 60_000 },
+                )
+            ).data,
+        );
+    } catch (e) {
+        if (e instanceof VideoRequestRejectedError) throw e;
+        if (axios.isAxiosError(e) && e.response && e.response.status >= 400 && e.response.status < 500 && ![408, 499].includes(e.response.status)) throw new VideoRequestRejectedError(apiRequestError(e, "视频生成失败"));
+        if (axios.isAxiosError(e) && ["ECONNABORTED", "ETIMEDOUT"].includes(e.code || "")) throw new Error("提交请求超时，结果待确认，请查询原任务，勿重复生成");
+        throw new Error(apiRequestError(e, "视频生成失败"));
     }
 }
-
-function normalizeVideoSeconds(value: string) {
-    const seconds = Math.floor(Number(value) || 6);
-    return String(Math.max(1, Math.min(20, seconds)));
-}
-
-function normalizeVideoSize(value: string) {
-    if (value === "auto") return null;
-    const size = value || "1280x720";
-    if (/^\d+x\d+$/.test(size)) return size;
-    return ["9:16", "2:3", "3:4"].includes(size) ? "720x1280" : "1280x720";
-}
-
-function normalizeVideoResolution(value: string) {
-    if (value === "low") return "480p";
-    if (value === "auto" || value === "high" || value === "medium") return "720p";
-    const resolution = value.replace(/p$/i, "") || "720";
-    return `${resolution}p`;
-}
-
-function unwrapVideoResponse(payload: ApiVideoResponse): VideoResponse {
-    if (!payload) throw new Error("接口没有返回视频任务");
-    if ("code" in payload && typeof payload.code === "number") {
-        if (payload.code !== 0) throw new Error(payload.msg || "请求失败");
-        if (!payload.data) throw new Error("接口没有返回视频任务");
-        return payload.data;
-    }
-    return payload as VideoResponse;
-}
-
-async function assertVideoBlob(blob: Blob) {
-    if (!blob.type.includes("json")) return;
-    let payload: { code?: number; msg?: string };
+export async function getVideoTask(id: string, signal?: AbortSignal): Promise<VideoGenerationTask> {
     try {
-        payload = JSON.parse(await blob.text()) as { code?: number; msg?: string };
-    } catch {
-        return;
+        return unwrap((await axios.get(aiApiPath(`/videos/${encodeURIComponent(id)}`), { timeout: 20_000, signal })).data);
+    } catch (e) {
+        queryError(e, "读取视频任务失败");
     }
-    if (typeof payload.code === "number" && payload.code !== 0) throw new Error(payload.msg || "视频下载失败");
+}
+export async function resumeVideoTask(id: string, signal?: AbortSignal): Promise<VideoGenerationTask> {
+    try {
+        return unwrap((await axios.post(aiApiPath(`/videos/${encodeURIComponent(id)}/resume`), undefined, { timeout: 20_000, signal })).data);
+    } catch (e) {
+        queryError(e, "恢复视频任务失败");
+    }
+}
+
+export async function getVideoTaskByClientRequest(id: string, signal?: AbortSignal): Promise<VideoGenerationTask> {
+    try {
+        return unwrap((await axios.get(aiApiPath(`/videos/by-client/${encodeURIComponent(id)}`), { timeout: 20_000, signal })).data);
+    } catch (e) {
+        queryError(e, "读取视频任务失败");
+    }
 }

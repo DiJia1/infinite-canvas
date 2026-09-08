@@ -38,6 +38,7 @@ export type CanvasImageResourceController = {
     snapshot: () => ReadonlyMap<string, CanvasImageResource>;
     errors: () => ReadonlyMap<string, string>;
     acknowledgeRendered: (nodeId: string, storageKey: string) => void;
+    retry: (nodeId: string) => void;
     dispose: () => void;
 };
 
@@ -122,6 +123,15 @@ export function createCanvasImageResourceController({ queue, releaseObjectURL, d
                 startLoad(created, request);
                 return;
             }
+            if (entry.request.mediaId !== request.mediaId) {
+                entries.delete(nodeId);
+                releaseEntry(entry);
+                const replacement: ResourceEntry = { request, generation: 0, retained: [] };
+                entries.set(nodeId, replacement);
+                startLoad(replacement, request);
+                notify();
+                return;
+            }
             const failedSameRequest = entry.error && entry.request.mediaId === request.mediaId && entry.request.variant === request.variant;
             entry.request = request;
             if (failedSameRequest) return;
@@ -143,6 +153,13 @@ export function createCanvasImageResourceController({ queue, releaseObjectURL, d
             const retained = entry.retained;
             entry.retained = [];
             retained.forEach((resource) => releaseIfUnused(resource.storageKey));
+        },
+        retry: (nodeId) => {
+            const entry = entries.get(nodeId);
+            if (!entry || disposed || entry.pending) return;
+            entry.error = undefined;
+            startLoad(entry, entry.request);
+            notify();
         },
         dispose: () => {
             if (disposed) return;

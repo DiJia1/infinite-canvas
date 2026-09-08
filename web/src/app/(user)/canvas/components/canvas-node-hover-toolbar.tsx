@@ -62,7 +62,7 @@ export function CanvasNodeHoverToolbar({
     const isImage = node.type === CanvasNodeType.Image;
     const isVideo = node.type === CanvasNodeType.Video;
     const hasImage = hasCanvasImage(node);
-    const hasVideo = isVideo && Boolean(node.metadata?.content);
+    const hasVideo = isVideo && Boolean(node.metadata?.content || node.metadata?.mediaId || node.metadata?.storageKey);
     const isText = node.type === CanvasNodeType.Text;
     const canOpenDialog = canOpenNodeGenerationDialog(node);
     const retryingLocalUpload = node.metadata?.localUploadState === "failed";
@@ -74,6 +74,7 @@ export function CanvasNodeHoverToolbar({
 
     return (
         <div
+            key={node.id}
             className="absolute z-[70] flex h-12 -translate-x-1/2 -translate-y-full items-center overflow-visible rounded-[18px] border border-black/10 bg-white text-[15px] text-[#242529] shadow-[0_8px_28px_rgba(15,23,42,.12)]"
             style={{ left, top }}
             onMouseEnter={() => onKeep(node.id)}
@@ -103,7 +104,7 @@ export function CanvasNodeHoverToolbar({
 
 function ToolbarAction({ title, label, icon, onClick, hint, active = false, disabled = false }: { title: string; label: string; icon: ReactNode; onClick?: () => void; hint?: string; active?: boolean; disabled?: boolean }) {
     return (
-        <Tooltip title={hint || title} placement="top" mouseEnterDelay={0.2}>
+        <Tooltip title={hint || title} placement="top" mouseEnterDelay={0.2} getPopupContainer={() => document.body} zIndex={1070} color="#262626" styles={{ container: { color: "#ffffff" } }}>
             <button type="button" disabled={disabled} className="disabled:opacity-50 group relative flex h-12 items-center whitespace-nowrap px-1.5" onClick={onClick} aria-label={title} aria-description={hint}>
                 <span className={`flex h-9 items-center gap-2 rounded-lg px-2.5 transition group-hover:bg-[#f0f0f1] ${active ? "bg-[#eeeeef]" : ""}`}>
                     {icon}
@@ -117,7 +118,7 @@ function ToolbarAction({ title, label, icon, onClick, hint, active = false, disa
 
 function IconAction({ title, icon, onClick }: { title: string; icon: ReactNode; onClick: () => void }) {
     return (
-        <Tooltip title={title} placement="top" mouseEnterDelay={0.2}>
+        <Tooltip title={title} placement="top" mouseEnterDelay={0.2} getPopupContainer={() => document.body} zIndex={1070} color="#262626" styles={{ container: { color: "#ffffff" } }}>
             <button type="button" className="group relative grid h-12 w-12 place-items-center px-1.5" onClick={onClick} aria-label={title}>
                 <span className="grid size-9 place-items-center rounded-lg transition group-hover:bg-[#f0f0f1]">{icon}</span>
             </button>

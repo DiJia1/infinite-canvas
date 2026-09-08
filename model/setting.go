@@ -17,6 +17,8 @@ type AIProvider struct {
 	Name            string                 `json:"name"`
 	Type            string                 `json:"type"`
 	Enabled         bool                   `json:"enabled"`
+	VideoPrices     []ImageResolutionPrice `json:"videoPrices"`
+	AspectRatios    []string               `json:"aspectRatios"`
 	ImagePrices     []ImageResolutionPrice `json:"imagePrices"`
 	ImageCallAmount decimal.Decimal        `json:"imageCallAmount"`
 	Config          json.RawMessage        `json:"config"`

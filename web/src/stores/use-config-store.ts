@@ -1,4 +1,5 @@
 "use client";
+import { reconcileVideoConfig } from "@/lib/video-config";
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
@@ -53,8 +54,8 @@ export const useConfigStore = create<ConfigStore>()(
             isConfigOpen: false,
             shouldPromptContinue: false,
             updateConfig: (key, value) => set((state) => ({ config: { ...state.config, [key]: value } })),
-            selectImageModel: (providerId) => set((state) => ({ config: reconcileProviderConfig({ ...state.config, imageProviderId: providerId }, state.status || emptyAIStatus) })),
-            selectVideoModel: (providerId) => set((state) => ({ config: reconcileProviderConfig({ ...state.config, videoProviderId: providerId }, state.status || emptyAIStatus) })),
+            selectImageModel: (providerId) => set((state) => ({ config: reconcileProviderConfig({ ...state.config, imageProviderId: providerId }, state.status) })),
+            selectVideoModel: (providerId) => set((state) => ({ config: reconcileProviderConfig({ ...state.config, videoProviderId: providerId }, state.status, true) })),
             loadPublicSettings: async () => {
                 if (get().isStatusLoading) return;
                 set({ isStatusLoading: true });
@@ -86,27 +87,25 @@ export const useConfigStore = create<ConfigStore>()(
     ),
 );
 
-const emptyAIStatus: AIStatus = { imageAvailable: false, imageEditable: false, videoAvailable: false, imageModels: [], videoModels: [] };
-
 export function isCapabilityReady(status: AIStatus | null | undefined, capability: AICapability): boolean {
     if (!status) return false;
     if (capability === "imageEdit") return status.imageEditable;
     return capability === "image" ? status.imageAvailable : status.videoAvailable;
 }
 
-export function reconcileProviderConfig(config: AiConfig, status: AIStatus): AiConfig {
+export function reconcileProviderConfig(config: AiConfig, status: AIStatus | null, resetVideoResolution = false): AiConfig {
+    if (!status) return config;
     const imageModel = resolveSelectedModel(status.imageModels, config.imageProviderId, status.defaultImageModelId);
-    const videoModel = resolveSelectedModel(status.videoModels, config.videoProviderId, status.defaultVideoModelId);
     const schema = imageModel?.imageRequestSchema || status.imageRequestSchema;
     const providerType = imageModel?.type || status.imageProviderType;
-    const baseConfig = { ...config, imageProviderId: imageModel?.id || config.imageProviderId, videoProviderId: videoModel?.id || config.videoProviderId };
+    const baseConfig = reconcileVideoConfig({ ...config, imageProviderId: imageModel?.id || config.imageProviderId }, status, resetVideoResolution);
     if (!schema || !providerType) return baseConfig;
     const legacyOptions = { quality: config.quality, size: config.size, resolution: config.resolution, outputFormat: config.outputFormat, background: config.background };
     const options = normalizeImageRequestOptions(schema, config.imageProviderType === providerType ? { ...legacyOptions, ...config.providerOptions } : legacyOptions);
     return {
         ...baseConfig,
         imageProviderId: imageModel?.id,
-        videoProviderId: videoModel?.id,
+        videoProviderId: baseConfig.videoProviderId,
         imageProviderType: providerType,
         imageRequestSchemaVersion: schema.version,
         providerOptions: options,

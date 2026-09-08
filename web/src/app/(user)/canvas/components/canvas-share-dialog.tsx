@@ -35,8 +35,8 @@ export function CanvasShareDialog({ projectId, revision, open, onClose }: { proj
             const shared = result.deliveries.filter((item) => item.status === "shared").length;
             const failed = result.deliveries.length - shared;
             if (shared) message.success(`已分享给 ${shared} 位成员`);
-            if (failed) message.error(`${failed} 位成员分享失败，请稍后重试`);
-            if (shared) onClose();
+            if (failed) message.error(`${failed} 位成员未完成分享：${result.deliveries.find((item) => item.status === "failed")?.message || "请稍后重试"}`);
+            if (shared && !failed) onClose();
         },
         onError: (error) => message.error(error instanceof Error ? error.message : "分享失败，请稍后重试"),
     });
@@ -49,7 +49,7 @@ export function CanvasShareDialog({ projectId, revision, open, onClose }: { proj
     }, [open]);
 
     const toggleRecipient = (userUid: string, checked: boolean) => {
-        setSelected((current) => checked ? [...new Set([...current, userUid])] : current.filter((item) => item !== userUid));
+        setSelected((current) => (checked ? [...new Set([...current, userUid])] : current.filter((item) => item !== userUid)));
     };
 
     return (
@@ -69,7 +69,7 @@ export function CanvasShareDialog({ projectId, revision, open, onClose }: { proj
                 </>
             }
         >
-            <p className="mb-4 text-sm text-stone-500 dark:text-stone-400">接收者会获得可独立编辑的画布副本，画布图片将复制到其“我的素材”。</p>
+            <p className="mb-4 text-sm text-stone-500 dark:text-stone-400">接收者会获得可独立编辑的画布副本，图片和视频会复制为接收者独立拥有的资源。视频需先完成上传或生成。</p>
             <Input.Search
                 value={search}
                 allowClear
@@ -81,16 +81,22 @@ export function CanvasShareDialog({ projectId, revision, open, onClose }: { proj
             />
             <div className="mt-3 max-h-72 overflow-auto rounded-lg border border-stone-200 dark:border-stone-800">
                 {recipients.isLoading ? (
-                    <div className="flex justify-center py-10"><Spin /></div>
-                ) : recipients.data?.items.length ? recipients.data.items.map((recipient) => {
-                    const checked = selected.includes(recipient.userUid);
-                    return (
-                        <label key={recipient.userUid} className="flex cursor-pointer items-center gap-3 border-b border-stone-100 px-3 py-3 last:border-b-0 hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900">
-                            <Checkbox checked={checked} disabled={!checked && selected.length >= MAX_RECIPIENTS} onChange={(event) => toggleRecipient(recipient.userUid, event.target.checked)} />
-                            <span className="min-w-0 truncate text-sm">{describeCanvasShareRecipient(recipient)}</span>
-                        </label>
-                    );
-                }) : <Empty className="py-7" image={Empty.PRESENTED_IMAGE_SIMPLE} description={recipients.isError ? "读取成员失败" : "没有可分享的成员"} />}
+                    <div className="flex justify-center py-10">
+                        <Spin />
+                    </div>
+                ) : recipients.data?.items.length ? (
+                    recipients.data.items.map((recipient) => {
+                        const checked = selected.includes(recipient.userUid);
+                        return (
+                            <label key={recipient.userUid} className="flex cursor-pointer items-center gap-3 border-b border-stone-100 px-3 py-3 last:border-b-0 hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900">
+                                <Checkbox checked={checked} disabled={!checked && selected.length >= MAX_RECIPIENTS} onChange={(event) => toggleRecipient(recipient.userUid, event.target.checked)} />
+                                <span className="min-w-0 truncate text-sm">{describeCanvasShareRecipient(recipient)}</span>
+                            </label>
+                        );
+                    })
+                ) : (
+                    <Empty className="py-7" image={Empty.PRESENTED_IMAGE_SIMPLE} description={recipients.isError ? "读取成员失败" : "没有可分享的成员"} />
+                )}
             </div>
             {(recipients.data?.total || 0) > PAGE_SIZE ? <Pagination className="mt-3" current={page} pageSize={PAGE_SIZE} total={recipients.data?.total} showSizeChanger={false} onChange={setPage} /> : null}
         </Modal>

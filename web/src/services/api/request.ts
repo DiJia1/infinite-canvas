@@ -76,10 +76,11 @@ export async function apiGet<T>(url: string, params?: ApiParams, token?: string)
     });
 }
 
-export async function apiPost<T>(url: string, body?: unknown, token?: string) {
+export async function apiPost<T>(url: string, body?: unknown, token?: string, timeout?: number) {
     return apiRequest<T>({
         url,
         method: "POST",
+        timeout,
         data: body,
         headers: jsonRequestHeaders(body, token),
     });
@@ -112,19 +113,21 @@ export async function apiPut<T>(url: string, body: unknown, token?: string, head
     });
 }
 
-async function apiRequest<T>(config: { url: string; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; params?: ApiParams; data?: unknown; headers?: Record<string, string> }) {
+async function apiRequest<T>(config: { timeout?: number; url: string; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; params?: ApiParams; data?: unknown; headers?: Record<string, string> }) {
     let response;
     try {
         response = await axios.request<ApiResponse<T>>({
             url: appApiPath(config.url),
             method: config.method,
+            ...(config.timeout ? { timeout: config.timeout } : {}),
             params: config.params,
             paramsSerializer: { serialize: (params) => serializeApiParams(params as ApiParams).toString() },
             data: config.data,
             headers: config.headers,
             validateStatus: () => true,
         });
-    } catch {
+    } catch (error) {
+        if (axios.isAxiosError(error) && ["ECONNABORTED", "ETIMEDOUT"].includes(error.code || "")) throw new Error("请求超时，结果待确认，请重试检查原操作结果");
         throw new Error("接口连接失败，请确认后端服务已启动");
     }
 

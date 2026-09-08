@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"errors"
 	"sort"
 
@@ -13,10 +14,13 @@ var ErrCanvasSaveRequestMismatch = errors.New("canvas save request does not matc
 
 var errCanvasProjectRevisionConflict = errors.New("canvas project revision condition was not accepted")
 
-func CreateCanvasProject(item model.CanvasProject) (model.CanvasProject, bool, error) {
+func CreateCanvasProject(item model.CanvasProject, contexts ...context.Context) (model.CanvasProject, bool, error) {
 	database, err := DB()
 	if err != nil {
 		return model.CanvasProject{}, false, err
+	}
+	if len(contexts) > 0 {
+		database = database.WithContext(contexts[0])
 	}
 	created := item
 	inserted := false
@@ -28,7 +32,7 @@ func CreateCanvasProject(item model.CanvasProject) (model.CanvasProject, bool, e
 		if result.RowsAffected == 0 {
 			return tx.Where("id = ? AND owner_uid = ?", item.ID, item.OwnerUID).First(&created).Error
 		}
-		change, err := newCanvasMediaChange(item.OwnerUID, nil, item.Document)
+		change, err := newCanvasMediaChange(item.OwnerUID, item.ID, nil, item.Document)
 		if err != nil {
 			return err
 		}
@@ -80,7 +84,7 @@ func ImportCanvasProjects(items []model.CanvasProject) ([]model.CanvasProject, e
 				continue
 			}
 			resultItems[index] = item
-			change, err := newCanvasMediaChange(item.OwnerUID, nil, item.Document)
+			change, err := newCanvasMediaChange(item.OwnerUID, item.ID, nil, item.Document)
 			if err != nil {
 				return err
 			}
@@ -135,7 +139,7 @@ func UpdateCanvasProject(ownerUID, id string, revision int, title string, docume
 		if existing.Revision != revision {
 			return nil
 		}
-		change, err := newCanvasMediaChange(ownerUID, existing.Document, document)
+		change, err := newCanvasMediaChange(ownerUID, id, existing.Document, document)
 		if err != nil {
 			return err
 		}
@@ -212,7 +216,7 @@ func UpdateCanvasProjectIdempotently(ownerUID, id string, revision int, title st
 		if existing.Revision != revision {
 			return errCanvasProjectRevisionConflict
 		}
-		change, err := newCanvasMediaChange(ownerUID, existing.Document, document)
+		change, err := newCanvasMediaChange(ownerUID, id, existing.Document, document)
 		if err != nil {
 			return err
 		}
@@ -274,6 +278,29 @@ func DeleteCanvasProject(ownerUID, id string, revision int) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	result := database.Where("id = ? AND owner_uid = ? AND revision = ?", id, ownerUID, revision).Delete(&model.CanvasProject{})
-	return result.RowsAffected > 0, result.Error
+	deleted := false
+	err = database.Transaction(func(tx *gorm.DB) error {
+		var item model.CanvasProject
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND owner_uid = ? AND revision = ?", id, ownerUID, revision).First(&item).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		ids, err := CanvasDocumentMediaIDs(item.Document)
+		if err != nil {
+			return err
+		}
+		if err := tx.Delete(&item).Error; err != nil {
+			return err
+		}
+		for mediaID := range ids {
+			if err := recordMediaLifecycle(tx, model.Media{ID: mediaID}, ownerUID, "reference_removed", id, "canvas_deleted"); err != nil {
+				return err
+			}
+		}
+		deleted = true
+		return nil
+	})
+	return deleted, err
 }

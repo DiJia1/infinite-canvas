@@ -1,5 +1,6 @@
 "use client";
 
+import { CanvasVideoContent } from "./canvas-video-content";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ChevronRight, Image as ImageIcon, RefreshCw, Star, Video } from "lucide-react";
@@ -18,6 +19,7 @@ const selectionBlue = "#2f80ff";
 
 type CanvasNodeProps = {
     data: CanvasNodeData;
+    videoVisible?: boolean;
     getScale: () => number;
     imageSource?: string;
     imageStorageKey?: string;
@@ -60,6 +62,7 @@ type CanvasNodeProps = {
 };
 
 type NodeContentRendererProps = {
+    videoVisible?: boolean;
     node: CanvasNodeData;
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     imageSource?: string;
@@ -85,6 +88,7 @@ type NodeContentRendererProps = {
 
 export const CanvasNode = React.memo(function CanvasNode({
     data,
+    videoVisible,
     getScale,
     imageSource,
     imageStorageKey,
@@ -135,7 +139,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     const [isEditingContent, setIsEditingContent] = useState(false);
     const resolvedImageSource = imageSourceManaged ? imageSource : data.metadata?.content;
     const hasImageContent = data.type === CanvasNodeType.Image && Boolean(resolvedImageSource);
-    const hasVideoContent = data.type === CanvasNodeType.Video && Boolean(data.metadata?.content);
+    const hasVideoContent = data.type === CanvasNodeType.Video && Boolean(data.metadata?.mediaId || data.metadata?.content);
     const isBatchRoot = data.type === CanvasNodeType.Image && Boolean(data.metadata?.isBatchRoot) && batchCount > 1;
     const isBatchChild = data.type === CanvasNodeType.Image && Boolean(data.metadata?.batchRootId);
     const isActive = isConnectionTarget || isSelected || isFocusRelated;
@@ -380,6 +384,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     }
                 >
                     <NodeContent
+                        videoVisible={videoVisible}
                         node={data}
                         theme={theme}
                         isEditingContent={isEditingContent}
@@ -408,7 +413,7 @@ export const CanvasNode = React.memo(function CanvasNode({
 
                 {showImageInfo && hasImageContent ? <ImageInfoBar node={data} /> : null}
 
-                {!hasImageContent && !hasVideoContent ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
+                {data.type !== CanvasNodeType.Config && !hasImageContent && !hasVideoContent ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
 
                 <ResizeHandle corner="top-left" onMouseDown={handleResizeMouseDown} />
                 <ResizeHandle corner="top-right" onMouseDown={handleResizeMouseDown} />
@@ -427,6 +432,7 @@ export const CanvasNode = React.memo(function CanvasNode({
 function areCanvasNodePropsEqual(prev: CanvasNodeProps, next: CanvasNodeProps) {
     return (
         prev.data === next.data &&
+        prev.videoVisible === next.videoVisible &&
         prev.imageSource === next.imageSource &&
         prev.imageStorageKey === next.imageStorageKey &&
         prev.imageSourceManaged === next.imageSourceManaged &&
@@ -563,10 +569,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, onContentChan
                     onWheel={(event) => event.stopPropagation()}
                 />
             ) : (
-                <div
-                    className={textClassName}
-                    style={textStyle}
-                >
+                <div className={textClassName} style={textStyle}>
                     {node.metadata?.content || <span style={{ color: theme.node.placeholder }}>双击编辑文字</span>}
                 </div>
             )}
@@ -630,15 +633,8 @@ function EmptyImageContent({ theme, isBatchRoot, batchCount, batchExpanded, batc
     return content;
 }
 
-function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
-    if (!node.metadata?.content)
-        return (
-            <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
-                <Video className="size-7 opacity-35" />
-                <span className="text-sm">视频节点(未开发完，请勿使用)</span>
-            </div>
-        );
-    return <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-no-zoom />;
+function VideoNodeContent({ node, videoVisible }: NodeContentRendererProps) {
+    return <CanvasVideoContent nodeId={node.id} mediaId={node.metadata?.mediaId} legacyURL={node.metadata?.content} visible={videoVisible} />;
 }
 
 function ImageContent({

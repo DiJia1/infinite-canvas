@@ -121,6 +121,9 @@ type ImageResult struct {
 }
 
 type ImageTaskRequest struct {
+	// RequestSchema is supplied only by server-side provider settings during normalization.
+	RequestSchema *ImageRequestSchema
+
 	Request    ImageRequest
 	References []ImageReference
 	Mask       *ImageReference
@@ -170,18 +173,44 @@ type ImageTaskRequestSummarizer interface {
 }
 
 type VideoRequest struct {
-	ProviderID string
-	Prompt     string
-	Seconds    string
-	Size       string
-	Resolution string
-	References []ImageReference
+	ProviderID    string
+	Prompt        string
+	Seconds       string
+	Size          string
+	Resolution    string
+	References    []ImageReference
+	ImageURLs     []string
+	VideoURLs     []string
+	GenerateAudio bool
+}
+
+type VideoSubmissionError struct {
+	Message   string
+	Uncertain bool
+}
+
+func (e *VideoSubmissionError) Error() string       { return e.Message }
+func (e *VideoSubmissionError) SafeMessage() string { return e.Message }
+
+type VideoRequestSchema struct {
+	Resolutions               []ImageRequestFieldOption `json:"resolutions"`
+	AspectRatios              []string                  `json:"aspectRatios"`
+	MinDuration               int                       `json:"minDuration"`
+	MaxDuration               int                       `json:"maxDuration"`
+	DefaultDuration           int                       `json:"defaultDuration"`
+	MaxReferenceImages        int                       `json:"maxReferenceImages"`
+	MaxReferenceVideos        int                       `json:"maxReferenceVideos"`
+	MaxReferenceVideoDuration int                       `json:"maxReferenceVideoDuration"`
 }
 
 type VideoTask struct {
-	ID     string `json:"id"`
-	Status string `json:"status,omitempty"`
-	Error  string `json:"error,omitempty"`
+	Progress   int      `json:"progress"`
+	ResultURLs []string `json:"resultUrls,omitempty"`
+	Cost       string   `json:"cost,omitempty"`
+	Currency   string   `json:"currency,omitempty"`
+	ID         string   `json:"id"`
+	Status     string   `json:"status,omitempty"`
+	Error      string   `json:"error,omitempty"`
 }
 
 type VideoContent struct {

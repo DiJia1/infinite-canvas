@@ -42,7 +42,14 @@ export type CanvasNodeMetadata = {
     quality?: string;
     count?: number;
     seconds?: string;
-    vquality?: string;
+    vquality?: string | null;
+    videoTaskId?: string;
+    videoTaskClientRequestId?: string;
+    videoTaskStatus?: string;
+    videoTaskProgress?: number;
+    duration?: number;
+    videoSize?: string;
+    generateAudio?: string;
     references?: string[];
     referenceMasks?: Array<import("@/types/image").ImageMask | undefined>;
     maskId?: string;

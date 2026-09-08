@@ -2,11 +2,13 @@
 
 import { hasCanvasImage } from "../components/canvas-node-actions";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { AiConfig } from "@/lib/ai-config";
+import { reconcileVideoConfig, type VideoModelStatus } from "@/lib/video-config";
 import type { AICapability } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
+import { VideoQueryTransientError, VideoRequestRejectedError, validateVideoGeneration, getVideoTask, getVideoTaskByClientRequest, resumeVideoTask, type VideoGenerationTask } from "@/services/api/video";
 import type { ImageGenerationTask } from "@/services/api/image";
 import { imageMetadata, type StoredCanvasImage } from "@/services/canvas-image-hydration";
 import type { UploadedFile } from "@/services/file-storage";
@@ -29,8 +31,6 @@ import type { CanvasMaskResources } from "../image-mask/mask-resources";
 import { CanvasNodeType, type CanvasConnection, type CanvasGenerationMode, type CanvasNodeData, type CanvasNodeMetadata, type Position } from "../types";
 import type { NodeGenerationContext } from "../components/canvas-node-generation";
 
-const VIDEO_NODE_MAX_WIDTH = 420;
-const VIDEO_NODE_MAX_HEIGHT = 420;
 const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
@@ -43,6 +43,7 @@ export type CanvasGenerationControllerOptions = {
     nodesRef: MutableRef<CanvasNodeData[]>;
     connectionsRef: MutableRef<CanvasConnection[]>;
     effectiveConfig: AiConfig;
+    getVideoModelStatus?: () => VideoModelStatus | null;
     defaultConfig: AiConfig;
     isAiConfigReady: (capability: AICapability) => boolean;
     openConfigDialog: (open: boolean) => void;
@@ -60,7 +61,12 @@ export type CanvasGenerationControllerOptions = {
     requestEdit: (config: AiConfig, prompt: string, references: ReferenceImage[], clientRequestId: string) => Promise<ImageGenerationTask>;
     getImageTask: (taskId: string) => Promise<ImageGenerationTask>;
     getImageTaskByClientRequest: (clientRequestId: string) => Promise<ImageGenerationTask>;
-    requestVideoGeneration: (config: AiConfig, prompt: string, references: ReferenceImage[]) => Promise<Blob>;
+    requestVideoGeneration: (config: AiConfig, prompt: string, references: ReferenceImage[], clientRequestId?: string, videoMediaIds?: string[]) => Promise<VideoGenerationTask>;
+    getVideoTask?: (id: string, signal?: AbortSignal) => Promise<VideoGenerationTask>;
+    resumeVideoTask?: (id: string, signal?: AbortSignal) => Promise<VideoGenerationTask>;
+    sessionScope?: string;
+    getSessionScope?: () => string;
+    getVideoTaskByClientRequest?: (id: string, signal?: AbortSignal) => Promise<VideoGenerationTask>;
     uploadImage: (input: string | Blob, mediaId?: string) => Promise<StoredCanvasImage>;
     uploadMediaFile: (input: Blob, prefix: string) => Promise<UploadedFile>;
     hydrateGenerationContext: (nodeId: string, prompt: string) => Promise<NodeGenerationContext>;
@@ -72,6 +78,7 @@ export type CanvasGenerationControllerOptions = {
 };
 
 export type CanvasGenerationController = {
+    stopVideoObservations: (all?: boolean) => void;
     readonly runningNodeId: string | null;
     updateOptions: (options: CanvasGenerationControllerOptions) => void;
     generateNode: (nodeId: string, mode: CanvasGenerationMode, prompt: string) => Promise<void>;
@@ -82,13 +89,52 @@ export type CanvasGenerationController = {
     clearRunningNode: (nodeIds?: Set<string>) => void;
 };
 
-function mediaMetadata(video: UploadedFile): CanvasNodeMetadata {
-    return { content: video.url, storageKey: video.storageKey, status: NODE_STATUS_SUCCESS, naturalWidth: video.width, naturalHeight: video.height, bytes: video.bytes, mimeType: video.mimeType || "video/mp4" };
-}
-
 export function createCanvasGenerationController(initialOptions: CanvasGenerationControllerOptions): CanvasGenerationController {
     let options = initialOptions;
     let runningNodeId: string | null = null;
+    const activeVideoTaskNodeIds = new Set<string>();
+    const videoOperations = new Set<{ controller: AbortController; scope: string | undefined; nodeId: string }>();
+    const beginVideoOperation = (nodeId: string) => {
+        const operation = { controller: new AbortController(), scope: options.getSessionScope?.() ?? options.sessionScope, nodeId };
+        videoOperations.add(operation);
+        return operation;
+    };
+    const stopVideoObservations = (all = false) => {
+        const scope = options.getSessionScope?.() ?? options.sessionScope;
+        for (const operation of videoOperations) {
+            if (all || operation.scope !== scope || !options.nodesRef.current.some((node) => node.id === operation.nodeId)) {
+                operation.controller.abort();
+                videoOperations.delete(operation);
+            }
+        }
+    };
+    const waitForVideo = (signal: AbortSignal, delay: number) =>
+        new Promise<void>((resolve, reject) => {
+            const abort = () => {
+                clearTimeout(timer);
+                reject(new DOMException("Aborted", "AbortError"));
+            };
+            const timer = setTimeout(() => {
+                signal.removeEventListener("abort", abort);
+                resolve();
+            }, delay);
+            signal.addEventListener("abort", abort, { once: true });
+            if (signal.aborted) {
+                signal.removeEventListener("abort", abort);
+                abort();
+            }
+        });
+    const queryVideo = async (query: () => Promise<VideoGenerationTask>, signal: AbortSignal) => {
+        for (let retry = 0; ; retry++) {
+            if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+            try {
+                return await query();
+            } catch (error) {
+                if (!(error instanceof VideoQueryTransientError) || retry >= 3 || signal.aborted) throw error;
+                await waitForVideo(signal, 12_000 * (retry + 1));
+            }
+        }
+    };
     const activeImageTaskNodeIds = new Set<string>();
     const setRunningNodeId = (next: string | null) => {
         runningNodeId = next;
@@ -227,7 +273,87 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
         setImageTaskState(nodeId, task);
         void observeImageTask(nodeId, rootId, task);
     };
+    const observeVideoTask = async (nodeId: string, initial?: VideoGenerationTask) => {
+        const scope = options.getSessionScope?.() ?? options.sessionScope;
+        const observationKey = JSON.stringify([scope, nodeId]);
+        if (activeVideoTaskNodeIds.has(observationKey)) return;
+        activeVideoTaskNodeIds.add(observationKey);
+        const operation = beginVideoOperation(nodeId);
+        const signal = operation.controller.signal;
+        const current = () => !signal.aborted && (options.getSessionScope?.() ?? options.sessionScope) === scope && options.nodesRef.current.some((node) => node.id === nodeId);
+        try {
+            const id = options.nodesRef.current.find((node) => node.id === nodeId)?.metadata?.videoTaskId;
+            const clientID = options.nodesRef.current.find((node) => node.id === nodeId)?.metadata?.videoTaskClientRequestId;
+            let task =
+                initial ||
+                (id ? await queryVideo(() => (options.getVideoTask || getVideoTask)(id, signal), signal) : clientID ? await queryVideo(() => (options.getVideoTaskByClientRequest || getVideoTaskByClientRequest)(clientID, signal), signal) : undefined);
+            while (task && current()) {
+                const terminal = ["failed", "uncertain", "paused"].includes(task.status);
+                const video = task.videos[0];
+                if (task.status === "succeeded" && !video?.mediaId) throw new Error("视频任务完成但未返回媒体引用");
+                options.setNodes((previous) =>
+                    previous.map((node) =>
+                        node.id === nodeId
+                            ? {
+                                  ...node,
+                                  metadata: {
+                                      ...node.metadata,
+                                      videoTaskId: task!.id,
+                                      videoTaskStatus: task!.status,
+                                      videoTaskProgress: task!.progress,
+                                      status: terminal ? NODE_STATUS_ERROR : task!.status === "succeeded" ? NODE_STATUS_SUCCESS : NODE_STATUS_LOADING,
+                                      errorDetails: terminal ? task!.error || (task!.status === "uncertain" ? "提交结果不确定，请勿重复生成" : "视频任务已暂停或失败") : undefined,
+                                      ...(task!.status === "succeeded" ? { mediaId: video.mediaId, content: undefined, mimeType: "video/mp4", duration: video.duration, naturalWidth: video.width, naturalHeight: video.height } : {}),
+                                  },
+                              }
+                            : node,
+                    ),
+                );
+                if (terminal || task.status === "succeeded") return;
+                await waitForVideo(signal, 12_000);
+                if (!current()) return;
+                const taskId = task.id;
+                task = await queryVideo(() => (options.getVideoTask || getVideoTask)(taskId, signal), signal);
+            }
+        } catch (error) {
+            if (current())
+                options.setNodes((previous) => previous.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails: error instanceof Error ? error.message : "读取视频任务失败" } } : node)));
+        } finally {
+            videoOperations.delete(operation);
+            activeVideoTaskNodeIds.delete(observationKey);
+        }
+    };
+    const startVideoTask = async (nodeId: string, config: AiConfig, prompt: string, references: ReferenceImage[], videos: string[]) => {
+        const clientRequestId = options.createId();
+        const scope = options.getSessionScope?.() ?? options.sessionScope;
+        options.setNodes((previous) => previous.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, videoTaskClientRequestId: clientRequestId } } : node)));
+        let task: VideoGenerationTask;
+        try {
+            task = await options.requestVideoGeneration(config, prompt, references, clientRequestId, videos);
+        } catch (error) {
+            if ((options.getSessionScope?.() ?? options.sessionScope) !== scope || !options.nodesRef.current.some((node) => node.id === nodeId)) return;
+            if (error instanceof VideoRequestRejectedError) {
+                options.setNodes((previous) => previous.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, videoTaskClientRequestId: undefined } } : node)));
+                throw error;
+            }
+            const operation = beginVideoOperation(nodeId);
+            try {
+                task = await queryVideo(() => (options.getVideoTaskByClientRequest || getVideoTaskByClientRequest)(clientRequestId, operation.controller.signal), operation.controller.signal);
+            } catch {
+                if (operation.controller.signal.aborted) return;
+                throw error;
+            } finally {
+                videoOperations.delete(operation);
+            }
+        }
+        if ((options.getSessionScope?.() ?? options.sessionScope) !== scope) return;
+        if (["succeeded", "failed", "uncertain", "paused"].includes(task.status)) await observeVideoTask(nodeId, task);
+        else void observeVideoTask(nodeId, task);
+    };
     const resumePendingImageTasks = () => {
+        options.nodesRef.current
+            .filter((node) => node.type === CanvasNodeType.Video && node.metadata?.status === NODE_STATUS_LOADING && (node.metadata.videoTaskId || node.metadata.videoTaskClientRequestId))
+            .forEach((node) => void observeVideoTask(node.id));
         options.nodesRef.current
             .filter((node) => node.type === CanvasNodeType.Image && node.metadata?.status === NODE_STATUS_LOADING && (node.metadata.imageTaskId || node.metadata.imageTaskClientRequestId))
             .forEach((node) => void observeImageTask(node.id, node.metadata?.batchRootId || node.id));
@@ -275,13 +401,16 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
     };
 
     const generateNode = async (nodeId: string, mode: CanvasGenerationMode, prompt: string) => {
+        const generationScope = options.getSessionScope?.() ?? options.sessionScope;
+        const scopeValid = () => mode !== "video" || (options.getSessionScope?.() ?? options.sessionScope) === generationScope;
         const sourceNode = options.nodesRef.current.find((node) => node.id === nodeId);
-        const generationConfig = buildGenerationConfig(options.effectiveConfig, sourceNode, options.defaultConfig);
+        const generationConfig = reconcileVideoConfig(buildGenerationConfig(options.effectiveConfig, sourceNode, options.defaultConfig), options.getVideoModelStatus?.());
         if (mode === "video" && !options.isAiConfigReady("video")) {
             options.openConfigDialog(true);
             return;
         }
         const generationContext = await options.hydrateGenerationContext(nodeId, prompt);
+        if (!scopeValid()) return;
         const effectivePrompt = generationContext.prompt.trim();
         const markSourceStatus = sourceNode?.type !== CanvasNodeType.Image;
         if (!effectivePrompt) {
@@ -298,6 +427,20 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
             }
             if (!options.isAiConfigReady(referenceImages.length ? "imageEdit" : "image")) {
                 options.openConfigDialog(true);
+                return;
+            }
+        }
+        if (mode === "video") {
+            const videos = generationContext.referenceVideos || [];
+            try {
+                validateVideoGeneration(
+                    generationConfig,
+                    referenceImages,
+                    videos.map((video) => video.mediaId || ""),
+                );
+                if (videos.some((video) => !video.mediaId) || videos.reduce((total, video) => total + (video.duration || 0), 0) > 15) throw new Error("参考视频必须上传完成，累计不超过 15 秒");
+            } catch (error) {
+                options.message.error(error instanceof Error ? error.message : "视频参数无效");
                 return;
             }
         }
@@ -399,8 +542,8 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
             }
 
             if (mode === "video") {
-                const spec = nodeSizeFromRatio(generationConfig.size, NODE_DEFAULT_SIZE[CanvasNodeType.Video].width, NODE_DEFAULT_SIZE[CanvasNodeType.Video].height) || NODE_DEFAULT_SIZE[CanvasNodeType.Video];
-                const isEmptyVideoNode = sourceNode?.type === CanvasNodeType.Video && !sourceNode.metadata?.content;
+                const spec = nodeSizeFromRatio(generationConfig.videoSize || "", NODE_DEFAULT_SIZE[CanvasNodeType.Video].width, NODE_DEFAULT_SIZE[CanvasNodeType.Video].height) || NODE_DEFAULT_SIZE[CanvasNodeType.Video];
+                const isEmptyVideoNode = sourceNode?.type === CanvasNodeType.Video && !sourceNode.metadata?.content && !sourceNode.metadata?.mediaId;
                 const videoId = isEmptyVideoNode ? nodeId : options.createId();
                 const parent = sourceNode?.position || { x: 0, y: 0 };
                 const videoNode: CanvasNodeData = {
@@ -416,6 +559,9 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
                         size: generationConfig.size,
                         seconds: generationConfig.videoSeconds,
                         vquality: generationConfig.vquality,
+                        videoSize: generationConfig.videoSize,
+                        generateAudio: generationConfig.generateAudio,
+                        videoProviderId: generationConfig.videoProviderId,
                         references: generationContext.referenceImages.map(referenceUrl).filter((url): url is string => Boolean(url)),
                     },
                 };
@@ -426,45 +572,50 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
                         : [...prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS } } : node)), videoNode],
                 );
                 if (!isEmptyVideoNode) options.setConnections((prev) => [...prev, createConnection(nodeId, videoId)]);
-                const video = await options.uploadMediaFile(await options.requestVideoGeneration(generationConfig, effectivePrompt, generationContext.referenceImages), "video");
-                const videoSize = fitNodeSize(video.width || spec.width, video.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
-                options.setNodes((prev) =>
-                    prev.map((node) =>
-                        node.id === videoId
-                            ? {
-                                  ...node,
-                                  width: videoSize.width,
-                                  height: videoSize.height,
-                                  position: { x: node.position.x + node.width / 2 - videoSize.width / 2, y: node.position.y + node.height / 2 - videoSize.height / 2 },
-                                  metadata: {
-                                      ...node.metadata,
-                                      ...mediaMetadata(video),
-                                      prompt: effectivePrompt,
-                                      size: generationConfig.size,
-                                      seconds: generationConfig.videoSeconds,
-                                      vquality: generationConfig.vquality,
-                                      references: generationContext.referenceImages.map(referenceUrl).filter((url): url is string => Boolean(url)),
-                                  },
-                              }
-                            : node,
-                    ),
+                const videoInputs = generationContext.referenceVideos || [];
+                if (videoInputs.length > 3 || videoInputs.some((video) => !video.mediaId) || videoInputs.reduce((total, video) => total + (video.duration || 0), 0) > 15) throw new Error("参考视频必须上传完成，最多 3 个且累计不超过 15 秒");
+                await startVideoTask(
+                    videoId,
+                    generationConfig,
+                    effectivePrompt,
+                    referenceImages,
+                    videoInputs.map((video) => video.mediaId!),
                 );
                 return;
             }
 
             return;
         } catch (error) {
+            if (!scopeValid()) return;
             const errorDetails = error instanceof Error ? error.message : "生成失败";
             options.message.error(errorDetails);
             options.setNodes((prev) =>
                 prev.map((node) => (node.id === nodeId || pendingChildIds.includes(node.id) ? (node.id === nodeId && !markSourceStatus ? node : { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } }) : node)),
             );
         } finally {
-            setRunningNodeId(null);
+            if (scopeValid()) setRunningNodeId(null);
         }
     };
 
     const retryNode = async (node: CanvasNodeData) => {
+        if (node.type === CanvasNodeType.Video && (node.metadata?.videoTaskId || node.metadata?.videoTaskClientRequestId)) {
+            const scope = options.getSessionScope?.() ?? options.sessionScope;
+            const operation = beginVideoOperation(node.id);
+            const signal = operation.controller.signal;
+            try {
+                let task = node.metadata.videoTaskId
+                    ? await queryVideo(() => (options.getVideoTask || getVideoTask)(node.metadata!.videoTaskId!, signal), signal)
+                    : await queryVideo(() => (options.getVideoTaskByClientRequest || getVideoTaskByClientRequest)(node.metadata!.videoTaskClientRequestId!, signal), signal);
+                if (signal.aborted || (options.getSessionScope?.() ?? options.sessionScope) !== scope) return;
+                if (task.status === "paused") task = await (options.resumeVideoTask || resumeVideoTask)(task.id, signal);
+                if (!signal.aborted && (options.getSessionScope?.() ?? options.sessionScope) === scope) void observeVideoTask(node.id, task);
+            } catch (error) {
+                if (!signal.aborted && (options.getSessionScope?.() ?? options.sessionScope) === scope) options.message.error(error instanceof Error ? error.message : "恢复视频任务失败");
+            } finally {
+                videoOperations.delete(operation);
+            }
+            return;
+        }
         if (node.type === CanvasNodeType.Text) {
             options.message.warning("文本节点不支持重新生成");
             return;
@@ -474,7 +625,7 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
         const savedImageMetadata = node.type === CanvasNodeType.Image ? { ...withoutLegacyModel(batchRoot?.metadata), ...withoutLegacyModel(node.metadata) } : undefined;
         const hasSavedImageMetadata = Boolean(savedImageMetadata?.generationType);
         const generationConfig = {
-            ...buildGenerationConfig(options.effectiveConfig, hasSavedImageMetadata && savedImageMetadata ? { ...node, metadata: savedImageMetadata } : sourceNode, options.defaultConfig),
+            ...reconcileVideoConfig(buildGenerationConfig(options.effectiveConfig, hasSavedImageMetadata && savedImageMetadata ? { ...node, metadata: savedImageMetadata } : sourceNode, options.defaultConfig), options.getVideoModelStatus?.()),
             count: "1",
         };
         const context = hasSavedImageMetadata ? null : await options.hydrateGenerationContext(sourceNode.id, sourceNode.metadata?.prompt || node.metadata?.prompt || "");
@@ -505,20 +656,15 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
         options.setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...withoutLegacyModel(item.metadata), status: NODE_STATUS_LOADING, errorDetails: undefined } } : item)));
         try {
             if (node.type === CanvasNodeType.Video) {
-                const video = await options.uploadMediaFile(await options.requestVideoGeneration(generationConfig, prompt, retryReferenceImages || []), "video");
-                const videoSize = fitNodeSize(video.width || node.width, video.height || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
-                options.setNodes((prev) =>
-                    prev.map((item) =>
-                        item.id === node.id
-                            ? {
-                                  ...item,
-                                  width: videoSize.width,
-                                  height: videoSize.height,
-                                  position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 },
-                                  metadata: { ...withoutLegacyModel(item.metadata), ...mediaMetadata(video), prompt, size: generationConfig.size, seconds: generationConfig.videoSeconds, vquality: generationConfig.vquality },
-                              }
-                            : item,
-                    ),
+                await startVideoTask(
+                    node.id,
+                    generationConfig,
+                    prompt,
+                    retryReferenceImages || [],
+                    (context?.referenceVideos || []).map((video) => {
+                        if (!video.mediaId) throw new Error("请先上传参考视频");
+                        return video.mediaId;
+                    }),
                 );
                 return;
             }
@@ -587,6 +733,7 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
     };
 
     return {
+        stopVideoObservations,
         get runningNodeId() {
             return runningNodeId;
         },
@@ -611,6 +758,22 @@ export function useCanvasGeneration(options: UseCanvasGenerationOptions) {
     if (!controllerRef.current) controllerRef.current = createCanvasGenerationController(controllerOptions);
     else controllerRef.current.updateOptions(controllerOptions);
     const controller = controllerRef.current;
+    useEffect(() => {
+        controller.stopVideoObservations();
+    });
+    useEffect(() => {
+        const stop = () => controller.stopVideoObservations(true);
+        const restore = (event: PageTransitionEvent) => {
+            if (event.persisted) controller.resumePendingImageTasks();
+        };
+        window.addEventListener("pagehide", stop);
+        window.addEventListener("pageshow", restore);
+        return () => {
+            window.removeEventListener("pagehide", stop);
+            window.removeEventListener("pageshow", restore);
+            stop();
+        };
+    }, [controller]);
     return {
         runningNodeId,
         generateNode: controller.generateNode,

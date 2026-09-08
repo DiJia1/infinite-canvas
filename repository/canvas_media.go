@@ -32,7 +32,7 @@ func CanvasDocumentMediaIDs(document []byte) (map[string]struct{}, error) {
 	}
 	ids := make(map[string]struct{})
 	for _, node := range parsed.Nodes {
-		if node.Type != "image" {
+		if node.Type != "image" && node.Type != "video" {
 			continue
 		}
 		raw, exists := node.Metadata["mediaId"]
@@ -52,11 +52,12 @@ func CanvasDocumentMediaIDs(document []byte) (map[string]struct{}, error) {
 
 type canvasMediaChange struct {
 	ownerUID      string
+	projectID     string
 	before, after map[string]struct{}
 }
 
-func newCanvasMediaChange(ownerUID string, before, after []byte) (canvasMediaChange, error) {
-	change := canvasMediaChange{ownerUID: ownerUID, before: make(map[string]struct{})}
+func newCanvasMediaChange(ownerUID, projectID string, before, after []byte) (canvasMediaChange, error) {
+	change := canvasMediaChange{ownerUID: ownerUID, projectID: projectID, before: make(map[string]struct{})}
 	var err error
 	if before != nil {
 		change.before, err = CanvasDocumentMediaIDs(before)
@@ -113,6 +114,24 @@ func applyCanvasMediaChanges(tx *gorm.DB, changes []canvasMediaChange) error {
 			}
 		}
 	}
+	for _, change := range changes {
+		for _, id := range ordered {
+			_, before := change.before[id]
+			_, after := change.after[id]
+			if before == after {
+				continue
+			}
+			event := "reference_added"
+			if before {
+				event = "reference_removed"
+			}
+			item := media[id]
+			item.ID = id
+			if err := recordMediaLifecycle(tx, item, change.ownerUID, event, change.projectID, "canvas_saved"); err != nil {
+				return err
+			}
+		}
+	}
 	// Read persisted references once per owner after every canvas write in this
 	// transaction, including all actual inserts in an import batch.
 	references := make(map[string]map[string]struct{})
@@ -153,6 +172,17 @@ func applyCanvasMediaChanges(tx *gorm.DB, changes []canvasMediaChange) error {
 		expiry, changed := updates[id]
 		if !changed {
 			continue
+		}
+		item := media[id]
+		if (item.ExpiresAt == nil && expiry != nil) || (item.ExpiresAt != nil && expiry == nil) {
+			event, reason := "cleanup_scheduled", "no_saved_canvas_reference"
+			if expiry == nil {
+				event, reason = "cleanup_cancelled", "canvas_reference_restored"
+			}
+			item.ExpiresAt = expiry
+			if err := recordMediaLifecycle(tx, item, "", event, "", reason); err != nil {
+				return err
+			}
 		}
 		if err := tx.Model(&model.Media{}).Where("id = ?", id).Update("expires_at", expiry).Error; err != nil {
 			return err

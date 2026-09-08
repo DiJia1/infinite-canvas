@@ -37,6 +37,7 @@ func DB() (*gorm.DB, error) {
 			&model.Media{},
 			&model.MediaUploadIntent{},
 			&model.ImageGenerationTask{},
+			&model.VideoGenerationTask{},
 			&model.PrivateFolder{},
 			&model.PublicFolder{},
 			&model.PublicImage{},
@@ -46,6 +47,9 @@ func DB() (*gorm.DB, error) {
 			&model.AppRBACState{},
 			&model.OperationLog{},
 		)
+		if dbErr == nil {
+			dbErr = migrateExplicitAspectRatios(db)
+		}
 	})
 	return db, dbErr
 }

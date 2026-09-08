@@ -1,11 +1,16 @@
 "use client";
 
 import type { CSSProperties } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Edit3, Eye, Image as ImageIcon, Play, Video } from "lucide-react";
-import { App, Button, Empty, Input, Modal, Segmented, Select } from "antd";
+import { App, Button, Empty, Input, Modal, Segmented } from "antd";
+
+import { resolveImageUrl } from "@/services/image-storage";
+import type { CanvasImageResource } from "../media/canvas-image-resource-controller";
 
 import { defaultConfig, reconcileProviderConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { CanvasSettingsSelect } from "@/components/canvas-settings-select";
+import { reconcileVideoConfig } from "@/lib/video-config";
 import { resolveSelectedModel } from "@/lib/model-selection";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -23,39 +28,61 @@ type CanvasConfigNodePanelProps = {
     onConfigChange: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
     onTextInputChange: (nodeId: string, content: string) => void;
     onGenerate: (nodeId: string) => void;
+    onPreviewImagesChange?: (configId: string, imageIds: string[]) => void;
+    imageResources?: ReadonlyMap<string, CanvasImageResource>;
+    imageErrors?: ReadonlyMap<string, string>;
+    onRetryImage?: (nodeId: string) => void;
+    onImageLoaded?: (nodeId: string, storageKey: string) => void;
+    onLayoutHeightChange?: (nodeId: string, height: number) => void;
 };
 
-export function CanvasConfigNodePanel({ node, inputSummary, inputs, onConfigChange, onTextInputChange, onGenerate }: CanvasConfigNodePanelProps) {
+export function CanvasConfigNodePanel({ node, inputSummary, inputs, onConfigChange, onTextInputChange, onGenerate, onLayoutHeightChange, onPreviewImagesChange, imageResources, imageErrors, onRetryImage, onImageLoaded }: CanvasConfigNodePanelProps) {
     const { message } = App.useApp();
     const previewContentRef = useRef<HTMLDivElement>(null);
+    const layoutRef = useRef<HTMLDivElement>(null);
+    useLayoutEffect(() => {
+        const layout = layoutRef.current;
+        if (!layout || !onLayoutHeightChange) return;
+        const syncHeight = () => onLayoutHeightChange(node.id, Math.ceil(layout.offsetHeight) + 4);
+        syncHeight();
+        const observer = new ResizeObserver(syncHeight);
+        observer.observe(layout);
+        return () => observer.disconnect();
+    }, [node.id, onLayoutHeightChange]);
     const [previewOpen, setPreviewOpen] = useState(false);
     const [editingTextId, setEditingTextId] = useState<string | null>(null);
     const [editingText, setEditingText] = useState("");
     const globalConfig = useEffectiveConfig();
-	const aiStatus = useConfigStore((state) => state.status);
+    const aiStatus = useConfigStore((state) => state.status);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const mode = node.metadata?.generationMode || "image";
-    const config = buildGenerationConfig(globalConfig, node, defaultConfig);
+    const config = reconcileVideoConfig(buildGenerationConfig(globalConfig, node, defaultConfig), aiStatus);
     const chipStyle = { background: theme.node.fill, borderColor: theme.node.stroke, color: theme.node.text };
     const textInputs = inputs.filter((input) => input.type === "text");
     const imageInputs = inputs.filter((input) => input.type === "image");
-	const selectedImageModel = resolveSelectedModel(aiStatus?.imageModels, config.imageProviderId, aiStatus?.defaultImageModelId);
-	const selectedVideoModel = resolveSelectedModel(aiStatus?.videoModels, config.videoProviderId, aiStatus?.defaultVideoModelId);
-	const selectImageModel = (imageProviderId: string) => {
-		if (!aiStatus) return;
-		const next = reconcileProviderConfig({ ...config, imageProviderId }, aiStatus);
-		onConfigChange(node.id, {
-			imageProviderId: next.imageProviderId,
-			imageProviderType: next.imageProviderType,
-			imageRequestSchemaVersion: next.imageRequestSchemaVersion,
-			providerOptions: next.providerOptions,
-			quality: next.quality,
-			size: next.size,
-			resolution: next.resolution,
-			outputFormat: next.outputFormat,
-			background: next.background,
-		});
-	};
+    const previewImageIds = JSON.stringify(imageInputs.map((input) => input.nodeId));
+    useEffect(() => {
+        if (!previewOpen || !onPreviewImagesChange) return;
+        onPreviewImagesChange(node.id, JSON.parse(previewImageIds));
+        return () => onPreviewImagesChange(node.id, []);
+    }, [node.id, previewOpen, previewImageIds, onPreviewImagesChange]);
+    const selectedImageModel = resolveSelectedModel(aiStatus?.imageModels, config.imageProviderId, aiStatus?.defaultImageModelId);
+    const selectedVideoModel = resolveSelectedModel(aiStatus?.videoModels, config.videoProviderId, aiStatus?.defaultVideoModelId);
+    const selectImageModel = (imageProviderId: string) => {
+        if (!aiStatus) return;
+        const next = reconcileProviderConfig({ ...config, imageProviderId }, aiStatus);
+        onConfigChange(node.id, {
+            imageProviderId: next.imageProviderId,
+            imageProviderType: next.imageProviderType,
+            imageRequestSchemaVersion: next.imageRequestSchemaVersion,
+            providerOptions: next.providerOptions,
+            quality: next.quality,
+            size: next.size,
+            resolution: next.resolution,
+            outputFormat: next.outputFormat,
+            background: next.background,
+        });
+    };
 
     const moveInput = (input: NodeGenerationInput, offset: number) => {
         const sameTypeInputs = inputs.filter((item) => item.type === input.type);
@@ -105,49 +132,54 @@ export function CanvasConfigNodePanel({ node, inputSummary, inputs, onConfigChan
     }, [previewOpen]);
 
     return (
-        <div className="flex h-full w-full cursor-move flex-col px-3 pb-3 pt-7 text-sm" style={{ color: theme.node.text }}>
-            <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="shrink-0 text-sm font-semibold">生成配置</div>
-                <div className="cursor-default" onMouseDown={(event) => event.stopPropagation()}>
-                    <Segmented
-                        size="small"
-                        className="canvas-config-mode !rounded-md !p-0.5"
-                        value={mode}
-                        onChange={(value) => onConfigChange(node.id, { generationMode: value as CanvasGenerationMode })}
-                        options={[
-                            {
-                                value: "image",
-                                label: (
-                                    <span className="inline-flex items-center gap-1">
-                                        <ImageIcon className="size-3.5" />
-                                        生图
-                                    </span>
-                                ),
-                            },
-                            {
-                                value: "video",
-                                label: (
-                                    <span className="inline-flex items-center gap-1">
-                                        <Video className="size-3.5" />
-                                        视频
-                                    </span>
-                                ),
-                            },
-                        ]}
-                    />
+        <div ref={layoutRef} className="flex min-w-0 w-full shrink-0 cursor-move flex-col gap-8 px-3 py-4 text-sm" style={{ color: theme.node.text }}>
+            <div className="flex min-w-0 shrink-0 flex-col gap-2">
+                <div className="flex shrink-0 items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                        <div className="shrink-0 text-sm font-semibold">生成配置</div>
+                        <button type="button" className="inline-flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-md border px-2 text-[11px]" style={chipStyle} onMouseDown={(event) => event.stopPropagation()} onClick={() => setPreviewOpen(true)}>
+                            <Eye className="size-3.5" />
+                            预览
+                        </button>
+                    </div>
+                    <div className="shrink-0 cursor-default" onMouseDown={(event) => event.stopPropagation()}>
+                        <Segmented
+                            size="small"
+                            className="canvas-config-mode !rounded-md !p-0.5"
+                            value={mode}
+                            onChange={(value) => onConfigChange(node.id, { generationMode: value as CanvasGenerationMode })}
+                            options={[
+                                {
+                                    value: "image",
+                                    label: (
+                                        <span className="inline-flex items-center gap-1">
+                                            <ImageIcon className="size-3.5" />
+                                            生图
+                                        </span>
+                                    ),
+                                },
+                                {
+                                    value: "video",
+                                    label: (
+                                        <span className="inline-flex items-center gap-1">
+                                            <Video className="size-3.5" />
+                                            视频
+                                        </span>
+                                    ),
+                                },
+                            ]}
+                        />
+                    </div>
+                </div>
+
+                <div className="flex shrink-0 flex-wrap gap-1.5">
+                    <InputChip label="提示词" value={`${inputSummary.textCount} 个`} style={chipStyle} />
+                    <InputChip label="参考图" value={`${inputSummary.imageCount} 张`} style={chipStyle} />
+                    {mode === "video" && <InputChip label="参考视频" value={`${inputs.filter((input) => input.video).length} 个 · ${inputs.reduce((total, input) => total + (input.video?.duration || 0), 0).toFixed(1)} 秒`} style={chipStyle} />}
                 </div>
             </div>
 
-            <div className="mb-2 flex flex-wrap gap-1.5">
-                <InputChip label="提示词" value={`${inputSummary.textCount} 个`} style={chipStyle} />
-                <InputChip label="参考图" value={`${inputSummary.imageCount} 张`} style={chipStyle} />
-                <button type="button" className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md border px-2 text-[11px]" style={chipStyle} onMouseDown={(event) => event.stopPropagation()} onClick={() => setPreviewOpen(true)}>
-                    <Eye className="size-3.5" />
-                    预览
-                </button>
-            </div>
-
-            <div className="mb-2 grid min-w-0 cursor-default grid-cols-1 items-center gap-2">
+            <div className="grid min-w-0 shrink-0 cursor-default grid-cols-1 items-center gap-2 rounded-lg border" style={{ borderColor: theme.node.stroke }}>
                 {mode === "video" ? (
                     <CanvasVideoSettingsPopover
                         config={config}
@@ -162,21 +194,21 @@ export function CanvasConfigNodePanel({ node, inputSummary, inputs, onConfigChan
                         autoAdjustOverflow={false}
                         buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2"
                         onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
-						onProviderOptionsChange={(providerOptions) => onConfigChange(node.id, { providerOptions, imageProviderType: config.imageProviderType, imageRequestSchemaVersion: config.imageRequestSchemaVersion })}
+                        onProviderOptionsChange={(providerOptions) => onConfigChange(node.id, { providerOptions, imageProviderType: config.imageProviderType, imageRequestSchemaVersion: config.imageRequestSchemaVersion })}
                     />
                 ) : null}
             </div>
 
-			<div className="mt-auto grid gap-2">
-				<Button type="primary" className="!h-9 !w-full !cursor-pointer !rounded-lg" disabled={!inputSummary.textCount && !inputSummary.imageCount} onMouseDown={(event) => event.stopPropagation()} onClick={() => onGenerate(node.id)}>
-					<span className="inline-flex items-center gap-1.5">
-						<Play className="size-4" />
-						<span>开始生成</span>
-					</span>
-				</Button>
-				{mode === "image" ? <CanvasConfigModelSelect value={selectedImageModel?.id} options={aiStatus?.imageModels} onChange={selectImageModel} /> : null}
-				{mode === "video" ? <CanvasConfigModelSelect value={selectedVideoModel?.id} options={aiStatus?.videoModels} onChange={(videoProviderId) => onConfigChange(node.id, { videoProviderId })} /> : null}
-			</div>
+            <div className="grid min-w-0 shrink-0 gap-2">
+                <Button type="primary" className="!h-9 !w-full !cursor-pointer !rounded-lg" disabled={(!inputSummary.textCount && !inputSummary.imageCount) || (mode === "video" && (!aiStatus || !config.vquality))} onMouseDown={(event) => event.stopPropagation()} onClick={() => onGenerate(node.id)}>
+                    <span className="inline-flex items-center gap-1.5">
+                        <Play className="size-4" />
+                        <span>开始生成</span>
+                    </span>
+                </Button>
+                {mode === "image" ? <CanvasConfigModelSelect value={selectedImageModel?.id} options={aiStatus?.imageModels} onChange={selectImageModel} /> : null}
+                {mode === "video" ? <CanvasConfigModelSelect value={selectedVideoModel?.id} options={aiStatus?.videoModels} onChange={(videoProviderId) => { const next = reconcileVideoConfig({ ...config, videoProviderId }, aiStatus, true); onConfigChange(node.id, { videoProviderId: next.videoProviderId, vquality: next.vquality }); }} /> : null}
+            </div>
             <Modal className="canvas-config-preview-modal" rootClassName="canvas-config-preview-modal-root" title="输入预览" open={previewOpen} onCancel={() => setPreviewOpen(false)} footer={null} width={860} centered destroyOnHidden>
                 <div ref={previewContentRef} className="min-h-0 flex-1 overflow-hidden" data-canvas-no-zoom onWheelCapture={(event) => event.stopPropagation()}>
                     {inputs.length ? (
@@ -185,7 +217,7 @@ export function CanvasConfigNodePanel({ node, inputSummary, inputs, onConfigChan
                                 <PreviewSection title="图片提示词" count={imageInputs.length} empty="暂无图片提示词">
                                     <div className="thin-scrollbar flex gap-1.5 overflow-x-auto pb-1">
                                         {imageInputs.map((input, index) => (
-                                            <ImageSortCard key={input.nodeId} input={input} imageIndex={index} imageTotal={imageInputs.length} theme={theme} onMove={moveInput} />
+                                            <ImageSortCard key={input.nodeId} input={input} resource={imageResources?.get(input.nodeId)} error={imageErrors?.get(input.nodeId)} onRetry={onRetryImage} onLoaded={onImageLoaded} imageIndex={index} imageTotal={imageInputs.length} theme={theme} onMove={moveInput} />
                                         ))}
                                     </div>
                                 </PreviewSection>
@@ -238,24 +270,18 @@ export function CanvasConfigNodePanel({ node, inputSummary, inputs, onConfigChan
 }
 
 function CanvasConfigModelSelect({ value, options, onChange }: { value: string | undefined; options: Array<{ id: string; name: string }> | undefined; onChange: (value: string) => void }) {
-	if (!options?.length) return null;
-	return (
-		<div className="w-full" data-canvas-no-zoom onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-			<Select
-				className="!w-full"
-				size="small"
-				value={value}
-				options={options.map((item) => ({ value: item.id, label: item.name }))}
-				popupMatchSelectWidth
-				popupRender={(menu) => (
-					<div data-canvas-no-zoom onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-						{menu}
-					</div>
-				)}
-				onChange={onChange}
-			/>
-		</div>
-	);
+    if (!options?.length) return null;
+    return (
+        <div className="min-w-0 w-full" data-canvas-no-zoom onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+            <CanvasSettingsSelect
+                className="!min-w-0 !w-full"
+                size="small"
+                value={value}
+                options={options.map((item) => ({ value: item.id, label: item.name }))}
+                onChange={onChange}
+            />
+        </div>
+    );
 }
 
 function PreviewSection({ title, count, empty, children }: { title: string; count: number; empty: string; children: React.ReactNode }) {
@@ -300,13 +326,58 @@ function TextSortCard({
     );
 }
 
+function InputPreviewImage({ input, resource, error, onRetry, onLoaded }: {
+    input: NodeGenerationInput;
+    resource?: CanvasImageResource;
+    error?: string;
+    onRetry?: (nodeId: string) => void;
+    onLoaded?: (nodeId: string, storageKey: string) => void;
+}) {
+    const [localUrl, setLocalUrl] = useState("");
+    const [failedUrl, setFailedUrl] = useState<string | null>(null);
+    const [localError, setLocalError] = useState(false);
+    const [attempt, setAttempt] = useState(0);
+    const image = input.image;
+    useEffect(() => {
+        if (image?.mediaId) return;
+        let active = true;
+        setLocalUrl("");
+        setLocalError(false);
+        void resolveImageUrl(image?.storageKey, image?.dataUrl || "").then((url) => {
+            if (active) { setLocalUrl(url); setLocalError(!url); }
+        }).catch(() => { if (active) setLocalError(true); });
+        return () => { active = false; };
+    }, [image?.mediaId, image?.storageKey, image?.dataUrl, attempt]);
+    const source = image?.mediaId ? resource?.mediaId === image.mediaId ? resource.url : "" : localUrl;
+    const failed = Boolean(error || (!image?.mediaId && localError) || (source && failedUrl === source));
+    return (
+        <div className="flex aspect-square w-full items-center justify-center">
+            {failed ? (
+                <button type="button" className="mt-5 px-1 text-[10px]" onClick={() => {
+                    setFailedUrl(null);
+                    if (image?.mediaId) onRetry?.(input.nodeId);
+                    else setAttempt((value) => value + 1);
+                }}>图片加载失败，点击重试</button>
+            ) : source ? (
+                <img src={source} alt={input.title} className="aspect-square w-full object-cover" onError={() => setFailedUrl(source)} onLoad={() => {
+                    if (resource) onLoaded?.(input.nodeId, resource.storageKey);
+                }} />
+            ) : <span role="status" className="text-[10px]">图片加载中…</span>}
+        </div>
+    );
+}
+
 function ImageSortCard({
-    input,
+    input, resource, error, onRetry, onLoaded,
     imageIndex,
     imageTotal,
     theme,
     onMove,
 }: {
+    resource?: CanvasImageResource;
+    error?: string;
+    onRetry?: (nodeId: string) => void;
+    onLoaded?: (nodeId: string, storageKey: string) => void;
     input: NodeGenerationInput;
     imageIndex: number;
     imageTotal: number;
@@ -319,7 +390,7 @@ function ImageSortCard({
     return (
         <div className="w-24 shrink-0 overflow-hidden rounded-lg border" style={{ background: theme.node.fill, borderColor: theme.node.stroke }}>
             <div className="relative">
-                <img src={input.image.dataUrl} alt={input.title} className="aspect-square w-full object-cover" />
+                <InputPreviewImage input={input} resource={resource} error={error} onRetry={onRetry} onLoaded={onLoaded} />
                 <span className="absolute left-1 top-1 rounded bg-black/50 px-1 py-0.5 text-[9px] font-medium text-white">{inputLabel}</span>
                 <HorizontalOrderButtons index={imageIndex} total={imageTotal} onMove={(offset) => onMove(input, offset)} />
             </div>

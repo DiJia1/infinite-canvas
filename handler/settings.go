@@ -54,7 +54,7 @@ func AdminSaveSettings(w http.ResponseWriter, r *http.Request) {
 func AdminOperationLogs(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
-	result, err := service.ListOperationLogs(model.OperationLogQuery{Action: r.URL.Query().Get("action"), Actor: r.URL.Query().Get("actor"), Status: r.URL.Query().Get("status"), Page: page, PageSize: pageSize})
+	result, err := service.ListOperationLogs(model.OperationLogQuery{MediaID: r.URL.Query().Get("mediaId"), Action: r.URL.Query().Get("action"), Actor: r.URL.Query().Get("actor"), Status: r.URL.Query().Get("status"), Page: page, PageSize: pageSize})
 	if err != nil {
 		FailError(w, err)
 		return
