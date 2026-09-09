@@ -76,3 +76,71 @@ export type WorkflowList = {
     page: number;
     pageSize: number;
 };
+
+export type WorkflowRunStatus = "pending" | "running" | "stopping" | "attention_required" | "completed" | "partially_completed" | "failed" | "stopped";
+export type WorkflowExecutionStatus = "waiting" | "ready" | "claimed" | "submitting" | "running" | "succeeded" | "failed" | "blocked" | "uncertain" | "stopped";
+
+export type WorkflowRun = {
+    id: string;
+    requestId: string;
+    workflowId: string;
+    revision: number;
+    title: string;
+    status: WorkflowRunStatus;
+    stopRequested: boolean;
+    createdAt: string;
+    updatedAt: string;
+    finishedAt?: string;
+};
+
+export type WorkflowStepExecution = {
+    runId: string;
+    nodeId: string;
+    status: WorkflowExecutionStatus;
+    error?: string;
+};
+
+export type WorkflowOutputExecution = {
+    runId: string;
+    nodeId: string;
+    slotId: string;
+    status: WorkflowExecutionStatus;
+    attempt: number;
+    mediaId?: string;
+    error?: string;
+    updatedAt: string;
+};
+
+export type WorkflowOutputAttempt = {
+    id: string;
+    runId: string;
+    nodeId: string;
+    slotId: string;
+    attempt: number;
+    requestId: string;
+    taskType: "image" | "video" | string;
+    taskId?: string;
+    status: WorkflowExecutionStatus;
+    error?: string;
+    mediaId?: string;
+    queuedAt?: string;
+    startedAt?: string;
+    createdAt: string;
+    updatedAt: string;
+    finishedAt?: string;
+};
+
+export type WorkflowRunDetail = {
+    run: WorkflowRun;
+    graph: WorkflowGraph;
+    steps: WorkflowStepExecution[];
+    outputs: WorkflowOutputExecution[];
+    attempts: WorkflowOutputAttempt[];
+};
+
+export type WorkflowRunList = {
+    items: WorkflowRun[];
+    total: number;
+    page: number;
+    pageSize: number;
+};

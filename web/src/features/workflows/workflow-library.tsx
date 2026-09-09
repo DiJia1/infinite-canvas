@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { App, Button, Empty, Input, Pagination, Skeleton } from "antd";
-import { Check, Copy, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Check, Clock3, Copy, Pencil, Plus, Trash2, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -74,9 +74,12 @@ export function WorkflowLibrary() {
                         <h1 className="mt-3 text-3xl font-semibold">自动化流程</h1>
                         <p className="mt-2 text-sm text-stone-500">保存并重复使用图片与视频生成流程。</p>
                     </div>
-                    <Button type="primary" icon={<Plus className="size-4" />} loading={createMutation.isPending} onClick={() => createMutation.mutate()}>
-                        新建流程
-                    </Button>
+                    <div className="flex items-center gap-2">
+                        <Button icon={<Clock3 className="size-4" />} onClick={() => router.push(appPath("/workflow-runs"))}>运行记录</Button>
+                        <Button type="primary" icon={<Plus className="size-4" />} loading={createMutation.isPending} onClick={() => createMutation.mutate()}>
+                            新建流程
+                        </Button>
+                    </div>
                 </header>
 
                 {workflows.isPending ? (

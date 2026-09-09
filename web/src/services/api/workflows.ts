@@ -1,4 +1,4 @@
-import type { WorkflowGraph, WorkflowList, WorkflowRecord } from "@/features/workflows/types";
+import type { WorkflowGraph, WorkflowList, WorkflowRecord, WorkflowRunDetail, WorkflowRunList } from "@/features/workflows/types";
 import { apiDelete, apiGet, apiPost, apiPut } from "./request";
 
 export type CreateWorkflowInput = { name: string; graph?: WorkflowGraph };
@@ -32,4 +32,28 @@ export function copyWorkflow(id: string, name?: string) {
 
 export async function deleteWorkflow(id: string, revision: number) {
     await apiDelete<true>(`/api/v1/workflows/${encodeURIComponent(id)}`, undefined, { revision });
+}
+
+export function createWorkflowRun(workflowId: string, requestId: string) {
+    return apiPost<WorkflowRunDetail>(`/api/v1/workflows/${encodeURIComponent(workflowId)}/runs`, { requestId });
+}
+
+export function fetchWorkflowRuns(page = 1, pageSize = 20, workflowId?: string) {
+    return apiGet<WorkflowRunList>("/api/v1/workflow-runs", { page, pageSize, ...(workflowId ? { workflowId } : {}) });
+}
+
+export function fetchWorkflowRun(id: string) {
+    return apiGet<WorkflowRunDetail>(`/api/v1/workflow-runs/${encodeURIComponent(id)}`);
+}
+
+export function stopWorkflowRun(id: string) {
+    return apiPost<WorkflowRunDetail>(`/api/v1/workflow-runs/${encodeURIComponent(id)}/stop`);
+}
+
+export function retryWorkflowOutput(id: string, input: { requestId: string; nodeId: string; slotId: string }) {
+    return apiPost<WorkflowRunDetail>(`/api/v1/workflow-runs/${encodeURIComponent(id)}/retry`, input);
+}
+
+export async function deleteWorkflowRun(id: string) {
+    await apiDelete<true>(`/api/v1/workflow-runs/${encodeURIComponent(id)}`);
 }

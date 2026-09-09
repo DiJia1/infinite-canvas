@@ -35,7 +35,7 @@ func WorkflowRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
-	items, err := service.ListWorkflowRuns(r.Context(), user, page, pageSize)
+	items, err := service.ListWorkflowRuns(r.Context(), user, r.URL.Query().Get("workflowId"), page, pageSize)
 	if err != nil {
 		writeWorkflowRunError(w, err)
 		return

@@ -157,7 +157,7 @@ function sameConnection(left: WorkflowConnection, right: WorkflowConnection) {
 export type WorkflowConnectionIdentity = Pick<WorkflowConnection, "targetNodeId" | "targetPortId">;
 
 export function workflowConnectionKey(connection: WorkflowConnectionIdentity) {
-    return `${connection.targetNodeId}:${connection.targetPortId}`;
+    return JSON.stringify([connection.targetNodeId, connection.targetPortId]);
 }
 
 export function findWorkflowConnection(graph: WorkflowGraph, identity: WorkflowConnectionIdentity) {

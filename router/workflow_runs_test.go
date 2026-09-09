@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -122,6 +123,55 @@ func TestWorkflowRunRoutesAreIdempotentOwnerScopedAndProtectActiveRuns(t *testin
 	}
 }
 
+func TestWorkflowRunRoutesFilterOneWorkflowWithoutLeakingAnotherOwner(t *testing.T) {
+	restore := configureWorkflowRouteRuntime(t)
+	defer restore()
+	stamp := time.Now().Format("150405.000000000")
+	owner := "workflow-filter-owner-" + stamp
+	other := "workflow-filter-other-" + stamp
+	targetWorkflowID := "workflow-filter-target-" + stamp
+	current := time.Now().UTC().Truncate(time.Microsecond)
+	database, err := repository.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := make([]model.WorkflowRun, 0, 63)
+	runs = append(runs, model.WorkflowRun{
+		ID: "workflow-filter-target-run-" + stamp, OwnerUID: owner, RequestID: "workflow-filter-target-request-" + stamp,
+		WorkflowID: targetWorkflowID, Revision: 1, Title: "target", Snapshot: `{}`, Status: "running", StateVersion: 1,
+		CreatedAt: current.Add(-time.Hour), UpdatedAt: current.Add(-time.Hour),
+	})
+	for index := 0; index < 61; index++ {
+		runs = append(runs, model.WorkflowRun{
+			ID: fmt.Sprintf("workflow-filter-noise-%s-%02d", stamp, index), OwnerUID: owner, RequestID: fmt.Sprintf("workflow-filter-noise-request-%s-%02d", stamp, index),
+			WorkflowID: "workflow-filter-noise-definition-" + stamp, Revision: 1, Title: "noise", Snapshot: `{}`, Status: "completed", StateVersion: 1,
+			CreatedAt: current.Add(time.Duration(index) * time.Second), UpdatedAt: current.Add(time.Duration(index) * time.Second),
+		})
+	}
+	runs = append(runs, model.WorkflowRun{
+		ID: "workflow-filter-other-run-" + stamp, OwnerUID: other, RequestID: "workflow-filter-other-request-" + stamp,
+		WorkflowID: targetWorkflowID, Revision: 1, Title: "other owner", Snapshot: `{}`, Status: "running", StateVersion: 1,
+		CreatedAt: current.Add(time.Hour), UpdatedAt: current.Add(time.Hour),
+	})
+	if err := database.Create(&runs).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	filtered := workflowRequest(http.MethodGet, "/api/v1/workflow-runs?page=1&pageSize=1&workflowId="+targetWorkflowID, owner, "")
+	var result struct {
+		Items []model.WorkflowRun `json:"items"`
+		Total int64               `json:"total"`
+	}
+	if filtered.Code != http.StatusOK || json.Unmarshal(workflowResponse(t, filtered).Data, &result) != nil || result.Total != 1 || len(result.Items) != 1 || result.Items[0].OwnerUID != "" || result.Items[0].ID != runs[0].ID {
+		t.Fatalf("filtered workflow runs = %d/%s decoded=%#v", filtered.Code, filtered.Body.String(), result)
+	}
+
+	invalid := workflowRequest(http.MethodGet, "/api/v1/workflow-runs?workflowId=not%2Fa%2Fworkflow", owner, "")
+	if invalid.Code != http.StatusBadRequest || workflowResponse(t, invalid).Code != 1 {
+		t.Fatalf("invalid workflow filter = %d/%s", invalid.Code, invalid.Body.String())
+	}
+}
+
 func TestWorkflowRunRoutesRejectDisabledExecutionAndInvalidWholeGraphParameters(t *testing.T) {
 	restore := configureWorkflowRouteRuntime(t)
 	defer restore()
@@ -147,6 +197,24 @@ func TestWorkflowRunRoutesRejectDisabledExecutionAndInvalidWholeGraphParameters(
 	memberResponse := workflowRequest(http.MethodPost, "/api/v1/workflows/"+disabledOwnerWorkflow+"/runs", disabledOwner, `{"requestId":"disabled-member"}`)
 	if memberResponse.Code != http.StatusBadRequest || workflowResponse(t, memberResponse).Code != 1 {
 		t.Fatalf("disabled member start = %d/%s", memberResponse.Code, memberResponse.Body.String())
+	}
+}
+
+func TestWorkflowRunRejectsAnUnconnectedDeclaredInputPort(t *testing.T) {
+	restore := configureWorkflowRouteRuntime(t)
+	defer restore()
+	owner := "workflow-missing-port-" + time.Now().Format("150405.000000000")
+	seedRouteWorkflowMember(t, owner, true)
+	body := `{"name":"缺少输入","graph":{"version":1,"nodes":[{"id":"prompt","type":"text_input","position":{"x":0,"y":0},"text":"生成产品图"},{"id":"generate","type":"image_generation","position":{"x":200,"y":0},"inputPorts":[{"id":"prompt","type":"text"},{"id":"reference","type":"image"}],"config":{"providerId":"workflow-route-provider","resolution":"1k"},"outputs":[{"id":"slot","type":"image"}]}],"connections":[{"sourceNodeId":"prompt","sourceSlotId":"output","targetNodeId":"generate","targetPortId":"prompt","order":0}]}}`
+	created := workflowRequest(http.MethodPost, "/api/v1/workflows", owner, body)
+	var workflow model.Workflow
+	if created.Code != http.StatusOK || json.Unmarshal(workflowResponse(t, created).Data, &workflow) != nil || workflow.ID == "" {
+		t.Fatalf("save incomplete draft = %d/%s", created.Code, created.Body.String())
+	}
+
+	run := workflowRequest(http.MethodPost, "/api/v1/workflows/"+workflow.ID+"/runs", owner, `{"requestId":"missing-port-run"}`)
+	if run.Code != http.StatusBadRequest || workflowResponse(t, run).Code != 1 {
+		t.Fatalf("run with unconnected declared input = %d/%s", run.Code, run.Body.String())
 	}
 }
 

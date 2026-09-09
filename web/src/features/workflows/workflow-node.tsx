@@ -1,14 +1,15 @@
 "use client";
 
 import { Button } from "antd";
-import { Image as ImageIcon, RefreshCw, Trash2, Upload, Video } from "lucide-react";
+import { Image as ImageIcon, LoaderCircle, RefreshCw, Trash2, Upload, Video } from "lucide-react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
-import type { WorkflowGenerationConfig, WorkflowNode, WorkflowOutputSlot } from "./types";
+import type { WorkflowGenerationConfig, WorkflowNode, WorkflowOutputExecution, WorkflowOutputSlot } from "./types";
 import { WorkflowConfigPanel } from "./workflow-config-panel";
 import { WorkflowMediaPreview } from "./workflow-media-preview";
+import { workflowOutputStatusText } from "./workflow-run-state";
 
 export type WorkflowPreviewInput = { key: string; sourceNodeId: string; type: "image" | "video" | "text"; text?: string; mediaId?: string; imageUrl?: string; imageStorageKey?: string; imageError?: string };
 
@@ -50,14 +51,14 @@ export function WorkflowNodeCard({ node, selected, connecting, videoVisible, inp
         >
             <div className="relative h-full w-full overflow-hidden rounded-3xl border shadow-[0_14px_34px_rgba(68,64,60,.12)]" style={{ background: theme.node.panel, borderColor: selected ? theme.node.activeStroke : theme.node.stroke, color: theme.node.text }}>
                 {node.type === "text_input" ? (
-                    <textarea
+                    <><div className="absolute inset-x-0 top-0 z-10 h-6 cursor-grab" aria-hidden="true" /><textarea
                         aria-label="流程文本输入"
                         value={node.text || ""}
                         placeholder="输入提示词"
-                        className="thin-scrollbar h-full w-full resize-none border-none bg-transparent p-4 font-mono text-sm leading-6 outline-none"
+                        className="thin-scrollbar h-full w-full resize-none border-none bg-transparent px-4 pb-4 pt-7 font-mono text-sm leading-6 outline-none"
                         onChange={(event) => onTextChange(event.target.value)}
                         onPointerDown={(event) => event.stopPropagation()}
-                    />
+                    /></>
                 ) : mediaType ? (
                     <WorkflowMediaPreview nodeId={node.id} type={mediaType} mediaId={node.mediaId} visible={videoVisible} imageUrl={imageUrl} imageStorageKey={imageStorageKey} imageError={imageError} onRetryImage={onRetryImage} onImageLoaded={onImageLoaded} onChoose={onChooseMedia} />
                 ) : generation ? (
@@ -83,10 +84,21 @@ export function WorkflowNodeCard({ node, selected, connecting, videoVisible, inp
     );
 }
 
-export function WorkflowOutputCard({ parent, slot, selected, onSelect, onDragStart, onRemove, onStartSource }: {
+export function WorkflowOutputCard({ parent, slot, selected, execution, resourceNodeId, videoVisible, imageUrl, imageStorageKey, imageError, retrying, confirmingRetry, onReloadMedia, onRetryOutput, onImageLoaded, onSelect, onDragStart, onRemove, onStartSource }: {
     parent: WorkflowNode;
     slot: WorkflowOutputSlot;
     selected: boolean;
+    execution?: WorkflowOutputExecution;
+    resourceNodeId?: string;
+    videoVisible?: boolean;
+    imageUrl?: string;
+    imageStorageKey?: string;
+    imageError?: string;
+    retrying?: boolean;
+    confirmingRetry?: boolean;
+    onReloadMedia?: () => void;
+    onRetryOutput?: () => void;
+    onImageLoaded?: (storageKey: string) => void;
     onSelect: () => void;
     onDragStart: (event: ReactPointerEvent, parent: WorkflowNode, slot: WorkflowOutputSlot) => void;
     onRemove: () => void;
@@ -97,11 +109,16 @@ export function WorkflowOutputCard({ parent, slot, selected, onSelect, onDragSta
     return (
         <div data-workflow-object className="group absolute" style={{ left: position.x, top: position.y, width: slot.width || (slot.type === "image" ? 340 : 420), height: slot.height || (slot.type === "image" ? 240 : 236) }} onPointerDown={(event) => onDragStart(event, parent, slot)} onClick={(event) => { event.stopPropagation(); onSelect(); }}>
             <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-3xl border shadow-[0_14px_34px_rgba(68,64,60,.12)]" style={{ background: theme.node.panel, borderColor: selected ? theme.node.activeStroke : theme.node.stroke, color: theme.node.placeholder }}>
-                <div className="flex flex-col items-center gap-3 text-xs opacity-55">
-                    {slot.type === "image" ? <ImageIcon className="size-7" /> : <Video className="size-7" />}
-                    等待运行结果
-                </div>
-                {slot.type === "image" ? <Button type="text" size="small" disabled icon={<RefreshCw className="size-3.5" />} className="!absolute !bottom-2 !right-2" title="运行结果失败后可重试">重试</Button> : null}
+                {execution?.status === "succeeded" && execution.mediaId && resourceNodeId ? (
+                    <WorkflowMediaPreview nodeId={resourceNodeId} type={slot.type} mediaId={execution.mediaId} visible={videoVisible} imageUrl={imageUrl} imageStorageKey={imageStorageKey} imageError={imageError} onRetryImage={onReloadMedia} onImageLoaded={onImageLoaded} />
+                ) : (
+                    <div className={`flex max-w-[85%] flex-col items-center gap-2 text-center text-xs ${execution?.status === "failed" || execution?.status === "blocked" ? "text-red-500" : "opacity-55"}`}>
+                        {execution && ["ready", "claimed", "submitting", "running"].includes(execution.status) ? <LoaderCircle className="size-6 animate-spin" /> : slot.type === "image" ? <ImageIcon className="size-7" /> : <Video className="size-7" />}
+                        <span>{workflowOutputStatusText(execution?.status)}</span>
+                        {execution?.error ? <span className="line-clamp-3 opacity-80">{execution.error}</span> : null}
+                    </div>
+                )}
+                {slot.type === "image" && execution?.status === "failed" && onRetryOutput ? <Button type="text" size="small" loading={retrying} icon={<RefreshCw className="size-3.5" />} className="!absolute !bottom-2 !right-2" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRetryOutput(); }}>{confirmingRetry ? "确认重试" : "重试"}</Button> : null}
                 {selected ? <Button danger type="text" size="small" shape="circle" icon={<Trash2 className="size-3.5" />} className="!absolute !right-2 !top-2" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }} aria-label="删除输出" /> : null}
             </div>
             <button type="button" aria-label="从输出开始连接" className="absolute right-0 top-1/2 z-30 flex size-10 translate-x-1/2 -translate-y-1/2 items-center justify-center opacity-0 group-hover:opacity-100" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onStartSource(); }}>

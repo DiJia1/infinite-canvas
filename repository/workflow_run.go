@@ -92,12 +92,15 @@ func GetWorkflowRunByRequest(ownerUID, requestID string) (model.WorkflowRun, boo
 	return item, result.RowsAffected > 0, result.Error
 }
 
-func ListWorkflowRuns(ownerUID string, page, pageSize int) ([]model.WorkflowRun, int64, error) {
+func ListWorkflowRuns(ownerUID, workflowID string, page, pageSize int) ([]model.WorkflowRun, int64, error) {
 	database, err := DB()
 	if err != nil {
 		return nil, 0, err
 	}
 	query := database.Model(&model.WorkflowRun{}).Where("owner_uid = ?", ownerUID)
+	if workflowID != "" {
+		query = query.Where("workflow_id = ?", workflowID)
+	}
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err

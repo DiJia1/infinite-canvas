@@ -1,8 +1,9 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { App, Button, Empty, Input, Modal, Spin } from "antd";
-import { ArrowLeft, Clapperboard, Image as ImageIcon, Images, LocateFixed, Play, Save, Type, Video, WandSparkles, ZoomIn, ZoomOut } from "lucide-react";
+import { App, Button, Drawer, Empty, Input, Modal, Spin } from "antd";
+import { ArrowLeft, Clapperboard, Clock3, Image as ImageIcon, Images, LocateFixed, Play, Save, Square, Type, Video, WandSparkles, ZoomIn, ZoomOut } from "lucide-react";
+import { nanoid } from "nanoid";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 
@@ -17,7 +18,7 @@ import { isEditableTarget } from "@/lib/editable-target";
 import { uploadUserImage } from "@/services/api/image";
 import { ApiRequestError } from "@/services/api/request";
 import { uploadVideoMedia } from "@/services/api/video-media";
-import { fetchWorkflow, fetchWorkflowVideos, updateWorkflow } from "@/services/api/workflows";
+import { createWorkflowRun, fetchWorkflow, fetchWorkflowRun, fetchWorkflowRuns, fetchWorkflowVideos, retryWorkflowOutput, stopWorkflowRun, updateWorkflow } from "@/services/api/workflows";
 import { portalSessionQuery } from "@/services/api/session";
 import { getRemoteImageAccess } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
@@ -29,6 +30,9 @@ import { addWorkflowConnection, createWorkflowNode, emptyWorkflowGraph, findAvai
 import { applyWorkflowSaveResult, cacheSavedWorkflow, clearWorkflowDraft, readWorkflowDraft, remoteWorkflowEditorState, workflowDetailQueryKey, workflowEditorSnapshot, writeWorkflowDraft, type WorkflowEditorDocument } from "./workflow-editor-state";
 import { WorkflowNodeCard, WorkflowOutputCard, type WorkflowPreviewInput } from "./workflow-node";
 import { WorkflowMediaPreview } from "./workflow-media-preview";
+import { WorkflowRunDetail } from "./workflow-run-detail";
+import { clearPendingWorkflowRetryRequest, clearPendingWorkflowRunRequest, ensureWorkflowRetryRequest, ensureWorkflowRunRequest, pendingWorkflowRetryKey, readPendingWorkflowRetryRequests, readPendingWorkflowRunRequest, workflowRetryWasAccepted, writePendingWorkflowRetryRequest, writePendingWorkflowRunRequest, type PendingWorkflowRetryRequest, type PendingWorkflowRunRequest } from "./workflow-run-requests";
+import { findWorkflowOutput, isRetryableImageOutput, isWorkflowRunActive, latestWorkflowRun, workflowOutputKey, workflowOutputResourceNodeId, workflowRunStatusText } from "./workflow-run-state";
 import { observeWorkflowViewport } from "./workflow-viewport";
 import type { WorkflowConnection, WorkflowGraph, WorkflowNode, WorkflowNodeType, WorkflowOutputSlot, WorkflowPosition } from "./types";
 
@@ -37,6 +41,10 @@ type Selection = { kind: "node"; nodeId: string } | { kind: "output"; nodeId: st
 type ConnectionStart = { nodeId: string; slotId: string } | null;
 type DragState = { kind: "node" | "output"; nodeId: string; slotId?: string; startX: number; startY: number; position: WorkflowPosition } | null;
 type SaveVariables = { revision: number; name: string; graph: WorkflowGraph; editorSnapshot: string };
+
+function isDefinitiveWorkflowMutationError(error: unknown) {
+    return error instanceof ApiRequestError && error.status >= 400 && error.status < 500;
+}
 
 export function WorkflowEditor() {
     const route = useParams<{ id: string | string[] }>();
@@ -58,6 +66,8 @@ export function WorkflowEditor() {
     const editorDocumentRef = useRef<WorkflowEditorDocument>({ name: "", graph: emptyWorkflowGraph() });
     const dragRef = useRef<DragState>(null);
     const panRef = useRef<{ x: number; y: number; viewport: Viewport } | null>(null);
+    const requestRestoreScopeRef = useRef("");
+    const retryRestoreScopeRef = useRef("");
     const [name, setName] = useState("");
     const [graph, setGraph] = useState<WorkflowGraph>(emptyWorkflowGraph);
     const [revision, setRevision] = useState(0);
@@ -72,6 +82,10 @@ export function WorkflowEditor() {
     const [uploading, setUploading] = useState(false);
     const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
     const [canvasElement, setCanvasElement] = useState<HTMLDivElement | null>(null);
+    const [currentRunId, setCurrentRunId] = useState<string | null>();
+    const [runDetailOpen, setRunDetailOpen] = useState(false);
+    const [pendingRunRequest, setPendingRunRequest] = useState<PendingWorkflowRunRequest>();
+    const [pendingRetryRequests, setPendingRetryRequests] = useState<Record<string, PendingWorkflowRetryRequest>>({});
     const attachCanvasElement = useCallback((element: HTMLDivElement | null) => {
         containerRef.current = element;
         setCanvasElement(element);
@@ -79,6 +93,60 @@ export function WorkflowEditor() {
 
     const workflow = useQuery({ queryKey: workflowDetailQueryKey(workflowId), queryFn: () => fetchWorkflow(workflowId!), enabled: Boolean(workflowId), refetchOnMount: "always", refetchOnWindowFocus: false, refetchOnReconnect: false });
     const workflowVideos = useQuery({ queryKey: ["workflow-video-assets"], queryFn: fetchWorkflowVideos, enabled: assetPickerOpen && mediaTarget?.type === "video" });
+    const workflowRuns = useQuery({
+        queryKey: ["workflow-runs", "workflow", workflowId],
+        queryFn: () => fetchWorkflowRuns(1, 1, workflowId),
+        enabled: Boolean(workflowId && workflow.data),
+        refetchInterval: (query) => query.state.data?.items.some((run) => run.workflowId === workflowId && isWorkflowRunActive(run.status)) ? 2500 : false,
+    });
+    const currentRun = useQuery({
+        queryKey: ["workflow-run", currentRunId],
+        queryFn: () => fetchWorkflowRun(currentRunId!),
+        enabled: Boolean(currentRunId),
+        refetchInterval: (query) => isWorkflowRunActive(query.state.data?.run.status) ? 1500 : false,
+    });
+    useEffect(() => {
+        setCurrentRunId(undefined);
+        setRunDetailOpen(false);
+        setPendingRunRequest(undefined);
+        setPendingRetryRequests({});
+        requestRestoreScopeRef.current = "";
+        retryRestoreScopeRef.current = "";
+    }, [workflowId]);
+    useEffect(() => {
+        if (!draftOwnerUID || !workflowId || !workflow.data || revision < 1 || typeof window === "undefined") return;
+        const scope = `${draftOwnerUID}:${workflowId}:${revision}`;
+        if (requestRestoreScopeRef.current === scope) return;
+        requestRestoreScopeRef.current = scope;
+        setPendingRunRequest(readPendingWorkflowRunRequest(window.sessionStorage, draftOwnerUID, workflowId));
+    }, [draftOwnerUID, revision, workflow.data, workflowId]);
+    useEffect(() => {
+        if (currentRunId !== undefined || !workflowRuns.data) return;
+        setCurrentRunId(latestWorkflowRun(workflowRuns.data.items, workflowId)?.id || null);
+    }, [currentRunId, workflowId, workflowRuns.data]);
+    useEffect(() => {
+        if (!draftOwnerUID || !currentRunId || typeof window === "undefined") return;
+        const scope = `${draftOwnerUID}:${currentRunId}`;
+        if (retryRestoreScopeRef.current === scope) return;
+        retryRestoreScopeRef.current = scope;
+        const restored = readPendingWorkflowRetryRequests(window.sessionStorage, draftOwnerUID, currentRunId);
+        if (restored.length) setPendingRetryRequests((current) => ({ ...current, ...Object.fromEntries(restored.map((request) => [pendingWorkflowRetryKey(request), request])) }));
+    }, [currentRunId, draftOwnerUID]);
+    useEffect(() => {
+        if (!pendingRunRequest || !workflowRuns.data) return;
+        const accepted = workflowRuns.data.items.find((run) => run.requestId === pendingRunRequest.requestId && run.workflowId === pendingRunRequest.workflowId);
+        if (!accepted) return;
+        setCurrentRunId(accepted.id);
+        if (draftOwnerUID && typeof window !== "undefined") clearPendingWorkflowRunRequest(window.sessionStorage, draftOwnerUID, pendingRunRequest.workflowId);
+        setPendingRunRequest(undefined);
+    }, [draftOwnerUID, pendingRunRequest, workflowRuns.data]);
+    useEffect(() => {
+        if (!currentRun.data) return;
+        const accepted = Object.entries(pendingRetryRequests).filter(([, pending]) => pending.runId === currentRun.data!.run.id && workflowRetryWasAccepted(pending, findWorkflowOutput(currentRun.data!.outputs, pending.nodeId, pending.slotId)));
+        if (!accepted.length) return;
+        if (draftOwnerUID && typeof window !== "undefined") accepted.forEach(([, pending]) => clearPendingWorkflowRetryRequest(window.sessionStorage, draftOwnerUID, pending));
+        setPendingRetryRequests((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !accepted.some(([acceptedKey]) => acceptedKey === key))));
+    }, [currentRun.data, draftOwnerUID, pendingRetryRequests]);
 
     const currentSnapshot = useMemo(() => workflowEditorSnapshot({ name, graph }), [graph, name]);
     editorDocumentRef.current = { name, graph };
@@ -103,17 +171,34 @@ export function WorkflowEditor() {
     const previewImageNodeIds = useMemo(() => new Set(graph.connections.flatMap((connection) => {
         if (connection.targetNodeId !== previewNodeId) return [];
         const source = graph.nodes.find((node) => node.id === connection.sourceNodeId);
-        return source && workflowSourceType(source, connection.sourceSlotId) === "image" ? [source.id] : [];
-    })), [graph.connections, graph.nodes, previewNodeId]);
-    const imageTargets = useMemo(() => graph.nodes.flatMap((node) => {
-        if (node.type !== "image_input" || !node.mediaId) return [];
-        const canvasNode = { id: node.id, type: CanvasNodeType.Image, title: "", position: node.position, width: node.width || 340, height: node.height || 240, metadata: { mediaId: node.mediaId } } satisfies CanvasNodeData;
-        const visible = isCanvasNodeNearViewport(canvasNode, viewport, viewportSize);
-        const preview = previewImageNodeIds.has(node.id);
-        const prefetch = !visible && isCanvasNodeNearViewport(canvasNode, viewport, viewportSize, 384);
-        if (!visible && !prefetch && !preview) return [];
-        return [{ node: canvasNode, visible, pinned: preview, prefetch, preview }];
-    }), [graph.nodes, previewImageNodeIds, viewport, viewportSize]);
+        if (!source || workflowSourceType(source, connection.sourceSlotId) !== "image") return [];
+        if (connection.sourceSlotId === "output") return [source.id];
+        const output = currentRun.data ? findWorkflowOutput(currentRun.data.outputs, source.id, connection.sourceSlotId) : undefined;
+        return output?.mediaId && currentRun.data ? [workflowOutputResourceNodeId(currentRun.data.run.id, source.id, connection.sourceSlotId)] : [];
+    })), [currentRun.data, graph.connections, graph.nodes, previewNodeId]);
+    const imageTargets = useMemo(() => {
+        const inputTargets = graph.nodes.flatMap((node) => {
+            if (node.type !== "image_input" || !node.mediaId) return [];
+            const canvasNode = { id: node.id, type: CanvasNodeType.Image, title: "", position: node.position, width: node.width || 340, height: node.height || 240, metadata: { mediaId: node.mediaId } } satisfies CanvasNodeData;
+            const visible = isCanvasNodeNearViewport(canvasNode, viewport, viewportSize);
+            const preview = previewImageNodeIds.has(node.id);
+            const prefetch = !visible && isCanvasNodeNearViewport(canvasNode, viewport, viewportSize, 384);
+            if (!visible && !prefetch && !preview) return [];
+            return [{ node: canvasNode, visible, pinned: preview, prefetch, preview }];
+        });
+        const outputTargets = graph.nodes.flatMap((node) => (node.outputs || []).flatMap((slot) => {
+            if (slot.type !== "image" || !currentRun.data) return [];
+            const output = findWorkflowOutput(currentRun.data.outputs, node.id, slot.id);
+            if (output?.status !== "succeeded" || !output.mediaId) return [];
+            const canvasNode = { id: workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id), type: CanvasNodeType.Image, title: "", position: slot.position || node.position, width: slot.width || 340, height: slot.height || 240, metadata: { mediaId: output.mediaId } } satisfies CanvasNodeData;
+            const visible = isCanvasNodeNearViewport(canvasNode, viewport, viewportSize);
+            const preview = previewImageNodeIds.has(canvasNode.id);
+            const prefetch = !visible && isCanvasNodeNearViewport(canvasNode, viewport, viewportSize, 384);
+            if (!visible && !prefetch && !preview) return [];
+            return [{ node: canvasNode, visible, pinned: preview, prefetch, preview }];
+        }));
+        return [...inputTargets, ...outputTargets];
+    }, [currentRun.data, graph.nodes, previewImageNodeIds, viewport, viewportSize]);
     const resolveImageAccess = useCallback((node: CanvasNodeData) => getRemoteImageAccess(node.metadata!.mediaId!), []);
     const imageResources = useCanvasImageResources({ targets: imageTargets, scale: viewport.k, resolveAccess: resolveImageAccess });
     useEffect(() => {
@@ -161,6 +246,90 @@ export function WorkflowEditor() {
             else message.error(error instanceof Error ? error.message : "保存流程失败");
         },
     });
+    const cacheRun = useCallback((detail: NonNullable<typeof currentRun.data>) => {
+        queryClient.setQueryData(["workflow-run", detail.run.id], detail);
+        setCurrentRunId(detail.run.id);
+        void queryClient.invalidateQueries({ queryKey: ["workflow-runs"] });
+    }, [queryClient]);
+    const createRun = useMutation({
+        retry: false,
+        mutationFn: (request: PendingWorkflowRunRequest) => createWorkflowRun(request.workflowId, request.requestId),
+        onSuccess: (detail, request) => {
+            cacheRun(detail);
+            if (draftOwnerUID && typeof window !== "undefined") clearPendingWorkflowRunRequest(window.sessionStorage, draftOwnerUID, request.workflowId);
+            setPendingRunRequest((current) => current?.requestId === request.requestId ? undefined : current);
+            message.success("流程已开始运行");
+        },
+        onError: (error, request) => {
+            if (isDefinitiveWorkflowMutationError(error)) {
+                if (draftOwnerUID && typeof window !== "undefined") clearPendingWorkflowRunRequest(window.sessionStorage, draftOwnerUID, request.workflowId);
+                setPendingRunRequest((current) => current?.requestId === request.requestId ? undefined : current);
+            }
+            else {
+                void workflowRuns.refetch();
+                message.warning("运行请求结果待确认，可再次点击并使用同一请求确认");
+                return;
+            }
+            message.error(error instanceof Error ? error.message : "启动流程失败");
+        },
+    });
+    const stopRun = useMutation({
+        mutationFn: (runId: string) => stopWorkflowRun(runId),
+        onSuccess: (detail) => {
+            cacheRun(detail);
+            message.success("已停止领取新的生成任务");
+        },
+        onError: (error) => message.error(error instanceof Error ? error.message : "停止流程失败"),
+    });
+    const retryOutput = useMutation({
+        retry: false,
+        mutationFn: (request: PendingWorkflowRetryRequest) => retryWorkflowOutput(request.runId, { requestId: request.requestId, nodeId: request.nodeId, slotId: request.slotId }),
+        onSuccess: (detail, request) => {
+            cacheRun(detail);
+            const key = pendingWorkflowRetryKey(request);
+            if (draftOwnerUID && typeof window !== "undefined") clearPendingWorkflowRetryRequest(window.sessionStorage, draftOwnerUID, request);
+            setPendingRetryRequests((current) => {
+                if (current[key]?.requestId !== request.requestId) return current;
+                const next = { ...current };
+                delete next[key];
+                return next;
+            });
+            message.success("已重新提交失败输出");
+        },
+        onError: (error, request) => {
+            if (isDefinitiveWorkflowMutationError(error)) {
+                const key = pendingWorkflowRetryKey(request);
+                if (draftOwnerUID && typeof window !== "undefined") clearPendingWorkflowRetryRequest(window.sessionStorage, draftOwnerUID, request);
+                setPendingRetryRequests((current) => {
+                    if (current[key]?.requestId !== request.requestId) return current;
+                    const next = { ...current };
+                    delete next[key];
+                    return next;
+                });
+                message.error(error instanceof Error ? error.message : "重试输出失败");
+                return;
+            }
+            void currentRun.refetch();
+            message.warning("重试请求结果待确认，可再次点击并使用同一请求确认");
+        },
+    });
+
+    const startRun = () => {
+        const request = ensureWorkflowRunRequest(pendingRunRequest, workflowId!, revision, nanoid);
+        if (draftOwnerUID && typeof window !== "undefined") writePendingWorkflowRunRequest(window.sessionStorage, draftOwnerUID, request);
+        setPendingRunRequest(request);
+        createRun.mutate(request);
+    };
+    const startOutputRetry = (nodeId: string, slotId: string) => {
+        if (!currentRun.data) return;
+        const output = findWorkflowOutput(currentRun.data.outputs, nodeId, slotId);
+        if (!output) return;
+        const key = pendingWorkflowRetryKey({ runId: currentRun.data.run.id, nodeId, slotId });
+        const request = ensureWorkflowRetryRequest(pendingRetryRequests[key], { runId: currentRun.data.run.id, nodeId, slotId, attempt: output.attempt }, nanoid);
+        if (draftOwnerUID && typeof window !== "undefined") writePendingWorkflowRetryRequest(window.sessionStorage, draftOwnerUID, request);
+        setPendingRetryRequests((current) => ({ ...current, [key]: request }));
+        retryOutput.mutate(request);
+    };
 
     const updateNode = useCallback((nodeId: string, update: (node: WorkflowNode) => WorkflowNode) => setGraph((current) => ({ ...current, nodes: current.nodes.map((node) => node.id === nodeId ? update(node) : node) })), []);
     const screenToWorld = useCallback((clientX: number, clientY: number) => {
@@ -240,9 +409,12 @@ export function WorkflowEditor() {
         if (!source) return [];
         const type = workflowSourceType(source, connection.sourceSlotId);
         if (!type) return [];
-        const resource = imageResources.resources.get(source.id);
-        return [{ key: connection.targetPortId, sourceNodeId: source.id, type, ...(type === "text" ? { text: source.text } : source.mediaId ? { mediaId: source.mediaId } : {}), ...(type === "image" && resource ? { imageUrl: resource.url, imageStorageKey: resource.storageKey } : {}), ...(type === "image" && imageResources.errors.get(source.id) ? { imageError: imageResources.errors.get(source.id) } : {}) }];
-    }), [graph, imageResources.errors, imageResources.resources]);
+        const execution = connection.sourceSlotId === "output" || !currentRun.data ? undefined : findWorkflowOutput(currentRun.data.outputs, source.id, connection.sourceSlotId);
+        const resourceNodeId = execution && currentRun.data ? workflowOutputResourceNodeId(currentRun.data.run.id, source.id, connection.sourceSlotId) : source.id;
+        const mediaId = source.mediaId || execution?.mediaId;
+        const resource = imageResources.resources.get(resourceNodeId);
+        return [{ key: connection.targetPortId, sourceNodeId: resourceNodeId, type, ...(type === "text" ? { text: source.text } : mediaId ? { mediaId } : {}), ...(type === "image" && resource ? { imageUrl: resource.url, imageStorageKey: resource.storageKey } : {}), ...(type === "image" && imageResources.errors.get(resourceNodeId) ? { imageError: imageResources.errors.get(resourceNodeId) } : {}) }];
+    }), [currentRun.data, graph, imageResources.errors, imageResources.resources]);
     const activePreviewInputs = previewNodeId ? previewInputs(previewNodeId) : [];
 
     const connectTo = (targetNodeId: string) => {
@@ -335,20 +507,29 @@ export function WorkflowEditor() {
         });
     };
     const leave = () => navigateAway(appPath("/workflows"));
+    const latestRunSummary = latestWorkflowRun(workflowRuns.data?.items, workflowId);
+    const runActive = isWorkflowRunActive(currentRun.data?.run.status || latestRunSummary?.status);
 
     if (session.isPending || workflow.isPending || (!loadedRef.current && (session.isFetching || workflow.isFetching))) return <div className="flex h-full items-center justify-center"><Spin /></div>;
     if (session.isError || workflow.isError || !workflow.data) return <div className="flex h-full flex-col items-center justify-center gap-4 text-sm text-stone-500"><span>{workflow.error instanceof Error ? workflow.error.message : session.error instanceof Error ? session.error.message : "流程加载失败"}</span><Button onClick={() => void Promise.all([session.refetch(), workflow.refetch()])}>重新加载</Button></div>;
 
     return (
-        <ScopedVideoResourceProvider scope={`workflow:${workflowId}`} nodeIds={graph.nodes.filter((node) => node.type === "video_input").map((node) => node.id)}>
+        <ScopedVideoResourceProvider scope={`workflow:${workflowId}:run:${currentRun.data?.run.id || "definition"}`} nodeIds={[
+            ...graph.nodes.filter((node) => node.type === "video_input").map((node) => node.id),
+            ...graph.nodes.flatMap((node) => (node.outputs || []).flatMap((slot) => slot.type === "video" && currentRun.data && findWorkflowOutput(currentRun.data.outputs, node.id, slot.id)?.mediaId ? [workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id)] : [])),
+            ...activePreviewInputs.filter((input) => input.type === "video" && input.mediaId).map((input) => `preview-${input.sourceNodeId}-${input.key}`),
+        ]}>
         <main className="relative flex h-full min-h-0 flex-col overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
             <header className="relative z-50 flex h-14 shrink-0 items-center gap-3 border-b px-3" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }}>
                 <Button type="text" shape="circle" icon={<ArrowLeft className="size-4" />} onClick={leave} aria-label="返回流程库" />
                 <Input value={name} maxLength={128} aria-label="流程名称" className="!w-52" onChange={(event) => setName(event.target.value)} />
                 <span className="text-xs opacity-50">{dirty ? "未保存" : `已保存 · v${revision}`}</span>
                 <div className="ml-auto flex items-center gap-2">
-                    <Button disabled icon={<Play className="size-4" />} title="运行记录将在执行阶段接入">运行</Button>
-                    <Button type="primary" icon={<Save className="size-4" />} disabled={!dirty || !name.trim()} loading={save.isPending} onClick={() => save.mutate({ revision, name: name.trim(), graph, editorSnapshot: currentSnapshot })}>保存</Button>
+                    <Button type="text" icon={<Clock3 className="size-4" />} onClick={() => navigateAway(appPath("/workflow-runs"))}>运行记录</Button>
+                    {currentRun.data ? <Button type="text" loading={currentRun.isFetching && !runActive} onClick={() => setRunDetailOpen(true)}>{workflowRunStatusText(currentRun.data.run.status)} · v{currentRun.data.run.revision}</Button> : null}
+                    {runActive && currentRun.data && !currentRun.data.run.stopRequested ? <Button danger icon={<Square className="size-4" />} loading={stopRun.isPending} onClick={() => stopRun.mutate(currentRun.data.run.id)}>停止</Button> : null}
+                    <Button icon={<Play className="size-4" />} disabled={runActive || save.isPending || (!pendingRunRequest && dirty)} loading={createRun.isPending} title={pendingRunRequest ? "使用同一请求 ID 确认上次运行" : dirty ? "请先保存当前修改" : runActive ? "当前运行结束后可再次运行" : undefined} onClick={startRun}>{pendingRunRequest ? "确认上次运行" : "运行"}</Button>
+                    <Button type="primary" icon={<Save className="size-4" />} disabled={!dirty || !name.trim() || Boolean(pendingRunRequest)} loading={save.isPending} title={pendingRunRequest ? "请先确认上次运行请求" : undefined} onClick={() => save.mutate({ revision, name: name.trim(), graph, editorSnapshot: currentSnapshot })}>保存</Button>
                     <AppActions variant="canvas" onOpenSettings={() => navigateAway(appPath("/admin/settings"))} />
                 </div>
             </header>
@@ -422,9 +603,20 @@ export function WorkflowEditor() {
                         ))}
                         {graph.nodes.flatMap((node) => (node.outputs || []).map((slot) => (
                             <WorkflowOutputCard
-                                key={slot.id}
+                                key={workflowOutputKey(node.id, slot.id)}
                                 parent={node}
                                 slot={slot}
+                                execution={currentRun.data ? findWorkflowOutput(currentRun.data.outputs, node.id, slot.id) : undefined}
+                                resourceNodeId={currentRun.data ? workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id) : undefined}
+                                videoVisible={isCanvasNodeNearViewport({ id: workflowOutputKey(node.id, slot.id), type: CanvasNodeType.Video, title: "", position: slot.position || node.position, width: slot.width || 420, height: slot.height || 236 } satisfies CanvasNodeData, viewport, viewportSize)}
+                                imageUrl={currentRun.data ? imageResources.resources.get(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id))?.url : undefined}
+                                imageStorageKey={currentRun.data ? imageResources.resources.get(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id))?.storageKey : undefined}
+                                imageError={currentRun.data ? imageResources.errors.get(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id)) : undefined}
+                                retrying={retryOutput.isPending && retryOutput.variables?.nodeId === node.id && retryOutput.variables.slotId === slot.id}
+                                confirmingRetry={Boolean(currentRun.data && pendingRetryRequests[pendingWorkflowRetryKey({ runId: currentRun.data.run.id, nodeId: node.id, slotId: slot.id })])}
+                                onReloadMedia={currentRun.data ? () => imageResources.retry(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id)) : undefined}
+                                onRetryOutput={currentRun.data && isRetryableImageOutput(slot, findWorkflowOutput(currentRun.data.outputs, node.id, slot.id), currentRun.data.run) ? () => startOutputRetry(node.id, slot.id) : undefined}
+                                onImageLoaded={(storageKey) => currentRun.data && imageResources.acknowledgeRendered(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id), storageKey)}
                                 selected={selection?.kind === "output" && selection.nodeId === node.id && selection.slotId === slot.id}
                                 onSelect={() => setSelection({ kind: "output", nodeId: node.id, slotId: slot.id })}
                                 onDragStart={startOutputDrag}
@@ -462,6 +654,18 @@ export function WorkflowEditor() {
                     </div>
                 ) : <div className="py-12 text-center text-sm text-stone-500">暂无输入</div>}
             </Modal>
+            <Drawer title="本次运行" open={runDetailOpen} width="min(920px, 94vw)" destroyOnHidden onClose={() => setRunDetailOpen(false)}>
+                {currentRun.isError ? <Empty description={currentRun.error instanceof Error ? currentRun.error.message : "运行详情加载失败"}><Button onClick={() => void currentRun.refetch()}>重新加载</Button></Empty> : (
+                    <WorkflowRunDetail
+                        detail={currentRun.data}
+                        stopping={stopRun.isPending}
+                        retryingKey={retryOutput.isPending && retryOutput.variables ? workflowOutputKey(retryOutput.variables.nodeId, retryOutput.variables.slotId) : undefined}
+                        confirmingRetryKeys={new Set(Object.values(pendingRetryRequests).filter((request) => request.runId === currentRun.data?.run.id).map((request) => workflowOutputKey(request.nodeId, request.slotId)))}
+                        onStop={currentRun.data ? () => stopRun.mutate(currentRun.data.run.id) : undefined}
+                        onRetry={currentRun.data ? startOutputRetry : undefined}
+                    />
+                )}
+            </Drawer>
         </main>
         </ScopedVideoResourceProvider>
     );
@@ -492,7 +696,7 @@ function WorkflowConnections({ graph, selection, connectionStart, mouseWorld, on
                 const position = slot.position || node.position;
                 const from = { x: node.position.x + (node.width || 360), y: node.position.y + (node.height || 260) / 2 };
                 const to = { x: position.x, y: position.y + (slot.height || 240) / 2 };
-                return <path key={`output:${node.id}:${slot.id}`} d={path(from, to)} fill="none" stroke={theme.node.muted} strokeWidth="2" strokeOpacity="0.55" strokeDasharray="6 5" pointerEvents="none" />;
+                return <path key={`output:${workflowOutputKey(node.id, slot.id)}`} d={path(from, to)} fill="none" stroke={theme.node.muted} strokeWidth="2" strokeOpacity="0.55" strokeDasharray="6 5" pointerEvents="none" />;
             }))}
             {graph.connections.map((connection) => {
                 const from = sourcePoint(connection.sourceNodeId, connection.sourceSlotId);

@@ -102,13 +102,21 @@ func CreateWorkflowRun(ctx context.Context, user PortalUser, workflowID string, 
 	return GetWorkflowRun(ctx, user, created.ID)
 }
 
-func ListWorkflowRuns(_ context.Context, user PortalUser, page, pageSize int) (WorkflowRunList, error) {
+func ListWorkflowRuns(_ context.Context, user PortalUser, workflowID string, page, pageSize int) (WorkflowRunList, error) {
 	if strings.TrimSpace(user.UID) == "" {
 		return WorkflowRunList{}, workflowValidationError{message: "未经过 Portal Gateway 身份验证"}
 	}
+	workflowID = strings.TrimSpace(workflowID)
+	if workflowID != "" {
+		var err error
+		workflowID, err = normalizeWorkflowPathID(workflowID)
+		if err != nil {
+			return WorkflowRunList{}, err
+		}
+	}
 	query := model.Query{Page: page, PageSize: pageSize}
 	query.Normalize()
-	items, total, err := repository.ListWorkflowRuns(user.UID, query.Page, query.PageSize)
+	items, total, err := repository.ListWorkflowRuns(user.UID, workflowID, query.Page, query.PageSize)
 	return WorkflowRunList{Items: items, Total: total, Page: query.Page, PageSize: query.PageSize}, err
 }
 
@@ -196,6 +204,20 @@ func DeleteWorkflowRun(_ context.Context, user PortalUser, id string) error {
 }
 
 func validateWorkflowRunInputs(ctx context.Context, user PortalUser, graph model.WorkflowGraph) error {
+	connectedPorts := make(map[string]struct{}, len(graph.Connections))
+	for _, connection := range graph.Connections {
+		connectedPorts[connection.TargetNodeID+"\x00"+connection.TargetPortID] = struct{}{}
+	}
+	for _, node := range graph.Nodes {
+		if node.Type != model.WorkflowNodeImageGeneration && node.Type != model.WorkflowNodeVideoGeneration {
+			continue
+		}
+		for _, port := range node.InputPorts {
+			if _, connected := connectedPorts[node.ID+"\x00"+port.ID]; !connected {
+				return workflowValidationError{message: "生成节点输入不完整"}
+			}
+		}
+	}
 	mediaIDs := workflowGraphMediaIDs(graph)
 	if len(mediaIDs) > 0 {
 		// Ownership and cleanup state are checked atomically when run refs are created.
