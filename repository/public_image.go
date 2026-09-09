@@ -96,11 +96,18 @@ func DeletePublicImageAndMedia(publicImageID, mediaID string) error {
 			return err
 		}
 		var item model.Media
-		if err := tx.First(&item, "id = ?", mediaID).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&item, "id = ?", mediaID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil
 			}
 			return err
+		}
+		held, err := workflowMediaReferenced(tx, item.ID)
+		if err != nil {
+			return err
+		}
+		if held {
+			return errors.New("素材正在被自动化流程或运行记录使用")
 		}
 		if err := tx.Delete(&item).Error; err != nil {
 			return err
@@ -124,6 +131,13 @@ func PreparePublicImageDeletion(publicID string, current time.Time, actorUID ...
 		}
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&media, "id = ?", public.MediaID).Error; err != nil {
 			return err
+		}
+		workflowHeld, err := workflowMediaReferenced(tx, media.ID)
+		if err != nil {
+			return err
+		}
+		if workflowHeld {
+			return errors.New("素材正在被自动化流程或运行记录使用")
 		}
 		held, err := videoTaskReferences(tx, media.ID, current)
 		if err != nil {

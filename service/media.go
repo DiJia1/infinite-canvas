@@ -313,7 +313,7 @@ func saveImage(ctx context.Context, user PortalUser, source model.MediaSource, f
 	}
 	width, height := imageDimensions(data)
 	item := model.Media{ID: newID("media"), OwnerUID: user.UID, Source: source, ObjectKey: key, ContentType: contentType, Bytes: int64(len(data)), Width: width, Height: height, Filename: filepath.Base(filename), Title: strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename)), CreatedAt: now()}
-	saved, err := repository.SaveMedia(item)
+	saved, err := repository.SaveMedia(item, ctx)
 	if err != nil {
 		_ = store.Delete(ctx, key)
 		return MediaAccess{}, err

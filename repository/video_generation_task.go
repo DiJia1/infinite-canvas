@@ -157,6 +157,9 @@ func CompleteVideoGenerationTask(item model.VideoGenerationTask, media []model.M
 			if err := tx.Create(&m).Error; err != nil {
 				return err
 			}
+			if err := holdWorkflowGeneratedMedia(tx, task.OwnerUID, task.ClientRequestID, m); err != nil {
+				return err
+			}
 			ids = append(ids, m.ID)
 		}
 		current := time.Now().UTC()

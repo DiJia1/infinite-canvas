@@ -164,7 +164,13 @@ func applyCanvasMediaChanges(tx *gorm.DB, changes []canvasMediaChange) error {
 				references[change.ownerUID] = refs
 			}
 			if _, retained := refs[id]; !retained {
-				updates[id] = &expiresAt
+				workflowHeld, err := workflowMediaReferenced(tx, id)
+				if err != nil {
+					return err
+				}
+				if !workflowHeld {
+					updates[id] = &expiresAt
+				}
 			}
 		}
 	}

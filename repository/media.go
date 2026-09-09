@@ -24,6 +24,13 @@ func SaveMedia(item model.Media, contexts ...context.Context) (model.Media, erro
 		if err := tx.Create(&item).Error; err != nil {
 			return err
 		}
+		if len(contexts) > 0 {
+			if request, ok := contexts[0].Value(workflowGenerationRequestKey{}).(workflowGenerationRequest); ok && request.owner == item.OwnerUID {
+				if err := holdWorkflowGeneratedMedia(tx, request.owner, request.requestID, item); err != nil {
+					return err
+				}
+			}
+		}
 		return recordMediaLifecycle(tx, item, item.OwnerUID, "created", "", "resource_created")
 	})
 	return item, err
@@ -57,6 +64,13 @@ func DeleteMedia(id string, contexts ...context.Context) error {
 				return nil
 			}
 			return err
+		}
+		held, err := workflowMediaReferenced(tx, item.ID)
+		if err != nil {
+			return err
+		}
+		if held {
+			return errors.New("素材正在被自动化流程或运行记录使用")
 		}
 		if err := tx.Delete(&item).Error; err != nil {
 			return err
@@ -224,6 +238,11 @@ func ClaimCanvasMediaCleanupBatch(ids []string, current time.Time, lease time.Du
 				continue
 			}
 			referenced := public[item.ID]
+			workflowHeld, err := workflowMediaReferenced(tx, item.ID)
+			if err != nil {
+				return err
+			}
+			referenced = referenced || workflowHeld
 			if !referenced {
 				held, err := videoTaskReferences(tx, item.ID, current)
 				if held {
@@ -347,6 +366,13 @@ func PreparePrivateMediaDeletion(id, ownerUID string, current time.Time) (model.
 		}
 		if item.CleanupStatus == model.MediaCleanupDeleting {
 			return ErrCanvasMediaUnavailable
+		}
+		workflowHeld, err := workflowMediaReferenced(tx, id)
+		if err != nil {
+			return err
+		}
+		if workflowHeld {
+			return errors.New("素材正在被自动化流程或运行记录使用")
 		}
 		held, err := videoTaskReferences(tx, id, current)
 		if err != nil {

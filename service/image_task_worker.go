@@ -275,6 +275,7 @@ func imageTaskTerminalResult(task ai.ImageTask) ([]string, error, bool) {
 
 func completeImageTask(ctx context.Context, item model.ImageGenerationTask, inputs []ImageTaskInput, urls []string) {
 	userContext := WithPortalUser(ctx, PortalUser{UID: item.OwnerUID})
+	userContext = repository.WithWorkflowGenerationRequest(userContext, item.OwnerUID, item.ClientRequestID)
 	images, err := persistGeneratedImages(userContext, providerImageResults(urls))
 	if err != nil {
 		failImageTask(ctx, item, err)
