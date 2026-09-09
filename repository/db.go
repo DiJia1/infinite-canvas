@@ -34,6 +34,12 @@ func DB() (*gorm.DB, error) {
 		dbErr = db.AutoMigrate(
 			&model.CanvasProject{},
 			&model.CanvasSaveRequest{},
+			&model.Workflow{},
+			&model.WorkflowMediaRef{},
+			&model.WorkflowRun{},
+			&model.WorkflowStepExecution{},
+			&model.WorkflowOutputExecution{},
+			&model.WorkflowOutputAttempt{},
 			&model.Media{},
 			&model.MediaUploadIntent{},
 			&model.ImageGenerationTask{},
