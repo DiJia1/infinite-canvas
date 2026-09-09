@@ -12,6 +12,7 @@ type WorkflowRun struct {
 	Title         string     `json:"title"`
 	Snapshot      string     `json:"-" gorm:"type:text"`
 	Status        string     `json:"status" gorm:"index"`
+	StateVersion  int64      `json:"-" gorm:"not null;default:1"`
 	StopRequested bool       `json:"stopRequested"`
 	CreatedAt     time.Time  `json:"createdAt" gorm:"index"`
 	UpdatedAt     time.Time  `json:"updatedAt"`

@@ -1,0 +1,117 @@
+package repository
+
+import (
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/basketikun/infinite-canvas/model"
+)
+
+func TestCreateWorkflowRunIsOwnerRequestIdempotent(t *testing.T) {
+	useRepositoryTestDB(t, newRepositoryTestConfig(t, "workflow_run_idempotent"))
+	current := time.Now().UTC()
+	first := model.WorkflowRun{ID: "run-first", OwnerUID: "run-owner", RequestID: "start-request", Snapshot: `{"version":1,"nodes":[],"connections":[]}`, Status: "pending", CreatedAt: current, UpdatedAt: current}
+	created, inserted, err := CreateWorkflowRun(first, nil, []model.WorkflowOutputExecution{{RunID: first.ID, NodeID: "node", SlotID: "slot", Status: "waiting", Attempt: 1, UpdatedAt: current}}, nil)
+	if err != nil || !inserted || created.ID != first.ID {
+		t.Fatalf("first CreateWorkflowRun() = %#v, %v, %v", created, inserted, err)
+	}
+	duplicate := first
+	duplicate.ID = "run-second"
+	created, inserted, err = CreateWorkflowRun(duplicate, nil, []model.WorkflowOutputExecution{{RunID: duplicate.ID, NodeID: "node", SlotID: "slot", Status: "waiting", Attempt: 1, UpdatedAt: current}}, nil)
+	if err != nil || inserted || created.ID != first.ID {
+		t.Fatalf("duplicate CreateWorkflowRun() = %#v, %v, %v", created, inserted, err)
+	}
+	database, _ := DB()
+	var count int64
+	if err := database.Model(&model.WorkflowOutputExecution{}).Where("run_id IN ?", []string{first.ID, duplicate.ID}).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("output count = %d, %v", count, err)
+	}
+}
+
+func TestClaimWorkflowAttemptAtomicallyEnforcesGlobalAndRunCapacity(t *testing.T) {
+	useRepositoryTestDB(t, newRepositoryTestConfig(t, "workflow_run_capacity"))
+	current := time.Now().UTC()
+	for runIndex := 1; runIndex <= 2; runIndex++ {
+		runID := fmt.Sprintf("capacity-run-%d", runIndex)
+		run := model.WorkflowRun{ID: runID, OwnerUID: "capacity-owner", RequestID: fmt.Sprintf("request-%d", runIndex), Snapshot: `{}`, Status: "running", CreatedAt: current, UpdatedAt: current}
+		outputs := []model.WorkflowOutputExecution{}
+		for slotIndex := 1; slotIndex <= 2; slotIndex++ {
+			outputs = append(outputs, model.WorkflowOutputExecution{RunID: runID, NodeID: "node", SlotID: fmt.Sprintf("slot-%d", slotIndex), Status: "ready", Attempt: 1, UpdatedAt: current})
+		}
+		if _, _, err := CreateWorkflowRun(run, nil, outputs, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, found, err := ClaimWorkflowAttempt(2, 1, true, current, time.Minute)
+	if err != nil || !found {
+		t.Fatalf("first claim = %#v, %v, %v", first, found, err)
+	}
+	second, found, err := ClaimWorkflowAttempt(2, 1, true, current, time.Minute)
+	if err != nil || !found || second.RunID == first.RunID {
+		t.Fatalf("second claim = %#v, %v, %v", second, found, err)
+	}
+	if third, found, err := ClaimWorkflowAttempt(2, 1, true, current, time.Minute); err != nil || found {
+		t.Fatalf("third claim exceeded capacity = %#v, %v, %v", third, found, err)
+	}
+}
+
+func TestWorkflowAttemptLeaseFencesAnExpiredWorker(t *testing.T) {
+	useRepositoryTestDB(t, newRepositoryTestConfig(t, "workflow_attempt_fence"))
+	current := time.Now().UTC()
+	run := model.WorkflowRun{ID: "fence-run", OwnerUID: "fence-owner", RequestID: "fence-request", Snapshot: `{}`, Status: "running", CreatedAt: current, UpdatedAt: current}
+	output := model.WorkflowOutputExecution{RunID: run.ID, NodeID: "node", SlotID: "slot", Status: "ready", Attempt: 1, UpdatedAt: current}
+	if _, _, err := CreateWorkflowRun(run, nil, []model.WorkflowOutputExecution{output}, nil); err != nil {
+		t.Fatal(err)
+	}
+	oldClaim, found, err := ClaimWorkflowAttempt(4, 2, true, current, time.Millisecond)
+	if err != nil || !found {
+		t.Fatalf("old claim = %#v, %v, %v", oldClaim, found, err)
+	}
+	newClaim, found, err := ClaimWorkflowAttempt(4, 2, true, current.Add(2*time.Millisecond), time.Minute)
+	if err != nil || !found || newClaim.ID != oldClaim.ID || newClaim.ClaimID == oldClaim.ClaimID {
+		t.Fatalf("new claim = %#v, %v, %v", newClaim, found, err)
+	}
+	oldClaim.Status = "failed"
+	if err := UpdateClaimedWorkflowAttempt(oldClaim, "failed", current, true); !errors.Is(err, ErrWorkflowLeaseLost) {
+		t.Fatalf("expired worker write error = %v, want ErrWorkflowLeaseLost", err)
+	}
+	newClaim.Status = "running"
+	if err := UpdateClaimedWorkflowAttempt(newClaim, "running", current.Add(time.Second), false); err != nil {
+		t.Fatalf("current worker write: %v", err)
+	}
+}
+
+func TestWorkflowAttemptRequestIDIsStableAndBounded(t *testing.T) {
+	long := string(make([]byte, 128))
+	first := workflowAttemptRequestID(long, long, long, 9)
+	if first != workflowAttemptRequestID(long, long, long, 9) || len(first) > 128 || first == workflowAttemptRequestID(long, long, long, 8) {
+		t.Fatalf("request ID is not stable and bounded: %q", first)
+	}
+}
+
+func TestWorkflowEvaluationRejectsAConcurrentStopSnapshot(t *testing.T) {
+	useRepositoryTestDB(t, newRepositoryTestConfig(t, "workflow_evaluation_stale"))
+	current := time.Now().UTC()
+	run := model.WorkflowRun{ID: "stale-run", OwnerUID: "stale-owner", RequestID: "stale-request", Snapshot: `{}`, Status: "running", CreatedAt: current, UpdatedAt: current}
+	output := model.WorkflowOutputExecution{RunID: run.ID, NodeID: "node", SlotID: "slot", Status: "waiting", Attempt: 1, UpdatedAt: current}
+	if _, _, err := CreateWorkflowRun(run, nil, []model.WorkflowOutputExecution{output}, nil); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := GetWorkflowRun(run.OwnerUID, run.ID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	if changed, err := RequestWorkflowRunStop(run.OwnerUID, run.ID, current.Add(time.Second)); err != nil || !changed {
+		t.Fatalf("RequestWorkflowRunStop() = %v, %v", changed, err)
+	}
+	err = UpdateWorkflowEvaluation(run.ID, record.Run.StateVersion, []model.WorkflowOutputExecution{{RunID: run.ID, NodeID: "node", SlotID: "slot", Status: "ready"}}, nil, "running", nil, current)
+	if !errors.Is(err, ErrWorkflowRunStale) {
+		t.Fatalf("stale evaluation error = %v", err)
+	}
+	updated, _, _ := GetWorkflowRun(run.OwnerUID, run.ID)
+	if !updated.Run.StopRequested || updated.Run.Status != "stopping" || updated.Outputs[0].Status != "waiting" {
+		t.Fatalf("stale evaluation overwrote stop: %#v", updated)
+	}
+}

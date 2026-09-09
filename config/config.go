@@ -28,6 +28,9 @@ type Config struct {
 	AITaskWorkerConcurrency        int      `env:"AI_TASK_WORKER_CONCURRENCY" envDefault:"4"`
 	AIVideoTaskTimeout             string   `env:"AI_VIDEO_TASK_TIMEOUT" envDefault:"30m"`
 	AIImageTaskTimeout             string   `env:"AI_IMAGE_TASK_TIMEOUT" envDefault:"3m"`
+	WorkflowEnabled                bool     `env:"WORKFLOW_ENABLED" envDefault:"true"`
+	WorkflowGlobalConcurrency      int      `env:"WORKFLOW_GLOBAL_CONCURRENCY" envDefault:"4"`
+	WorkflowRunConcurrency         int      `env:"WORKFLOW_RUN_CONCURRENCY" envDefault:"2"`
 	CanvasSaveSuccessLogSampleRate float64  `env:"CANVAS_SAVE_SUCCESS_LOG_SAMPLE_RATE" envDefault:"0.05"`
 }
 

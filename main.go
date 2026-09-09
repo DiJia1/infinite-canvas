@@ -31,6 +31,11 @@ func main() {
 		log.Fatal(err)
 	}
 	defer stopVideoTasks()
+	stopWorkflowScheduler, err := service.StartWorkflowScheduler(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stopWorkflowScheduler()
 	stopAuditRetention := service.StartOperationLogRetention(context.Background())
 	defer stopAuditRetention()
 	stopCanvasSaveRetention := service.StartCanvasSaveRequestRetention(context.Background())
