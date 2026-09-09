@@ -479,7 +479,7 @@ func TestCanvasProjectShareRollsBackRecipientMediaAfterCopyFailure(t *testing.T)
 	if err != nil || len(projects) != 0 {
 		t.Fatalf("failed share left projects = %#v, %v", projects, err)
 	}
-	media, err := repository.ListPrivateMedia(recipient)
+	media, err := repository.ListPrivateMedia(recipient, repository.PrivateMediaKindImage)
 	if err != nil || len(media) != 0 {
 		t.Fatalf("failed share left media rows = %#v, %v", media, err)
 	}

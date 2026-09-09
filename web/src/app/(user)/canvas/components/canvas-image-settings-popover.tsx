@@ -24,9 +24,10 @@ type CanvasImageSettingsPopoverProps = {
     getPopupContainer?: (triggerNode: HTMLElement) => HTMLElement;
     placement?: "topLeft" | "top" | "topRight" | "bottomLeft" | "bottom" | "bottomRight";
     autoAdjustOverflow?: boolean;
+    maxCount?: number;
 };
 
-export function CanvasImageSettingsPopover({ config, onConfigChange, onProviderOptionsChange, onOpenChange, buttonClassName, placement = "topLeft" }: CanvasImageSettingsPopoverProps) {
+export function CanvasImageSettingsPopover({ config, onConfigChange, onProviderOptionsChange, onOpenChange, buttonClassName, placement = "topLeft", maxCount = 15 }: CanvasImageSettingsPopoverProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
@@ -37,7 +38,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onProviderO
 	const schema = selectedImageModel?.imageRequestSchema || (config.imageProviderType === aiStatus?.imageProviderType ? aiStatus?.imageRequestSchema : undefined);
 	const options = normalizeImageRequestOptions(schema, config.providerOptions);
     const quality = schemaOptionString(options, "quality") || config.quality || "auto";
-    const count = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
+    const count = Math.max(1, Math.min(maxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
     const activeSize = schemaOptionString(options, "size") || config.size || "auto";
     const updateOpen = (nextOpen: boolean) => {
         setOpen(nextOpen);
@@ -66,7 +67,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onProviderO
         };
     }, [onOpenChange, open]);
 
-    const panel = open && buttonRect ? <ImageSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} schema={schema} onConfigChange={onConfigChange} onProviderOptionsChange={onProviderOptionsChange} /> : null;
+    const panel = open && buttonRect ? <ImageSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} schema={schema} maxCount={maxCount} onConfigChange={onConfigChange} onProviderOptionsChange={onProviderOptionsChange} /> : null;
 
     return (
         <>
@@ -98,6 +99,7 @@ function ImageSettingsPortal({
 	schema,
     onConfigChange,
 	onProviderOptionsChange,
+    maxCount,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
@@ -107,6 +109,7 @@ function ImageSettingsPortal({
 	schema?: import("@/lib/image-request-schema").ImageRequestSchema;
     onConfigChange: (key: keyof AiConfig, value: string) => void;
 	onProviderOptionsChange?: (options: ImageRequestOptions) => void;
+    maxCount: number;
 }) {
     const style = {
         position: "fixed",
@@ -132,7 +135,7 @@ function ImageSettingsPortal({
             onWheel={(event) => event.stopPropagation()}
         >
             <div style={{ maxHeight: style.maxHeight, overflowY: "auto", padding: 18, borderRadius: "inherit" }}>
-                <ImageSettingsPanel config={config} schema={schema} onConfigChange={(key, value) => onConfigChange(key, value)} onProviderOptionsChange={onProviderOptionsChange} theme={theme} className="space-y-4" />
+                <ImageSettingsPanel config={config} schema={schema} maxCount={maxCount} onConfigChange={(key, value) => onConfigChange(key, value)} onProviderOptionsChange={onProviderOptionsChange} theme={theme} className="space-y-4" />
             </div>
         </div>,
         document.body,
@@ -140,7 +143,7 @@ function ImageSettingsPortal({
 }
 
 function imageSettingsSummary(config: AiConfig, schema: import("@/lib/image-request-schema").ImageRequestSchema | undefined, options: ImageRequestOptions, quality: string, size: string, count: number) {
-	if (!schema) return `${imageQualityLabel(quality)} · ${imageSizeLabel(size)} · ${imageResolutionLabel(config.resolution)} · ${imageOutputFormatLabel(config.outputFormat)} · ${imageBackgroundLabel(config.background)} · ${count} 张`;
+	if (!schema) return [imageQualityLabel(quality), imageSizeLabel(size), imageResolutionLabel(config.resolution), imageOutputFormatLabel(config.outputFormat), imageBackgroundLabel(config.background), `${count} 张`].filter(Boolean).join(" · ");
 	const fields = schema.fields
 		.map((field) => {
 			const value = options[field.key];

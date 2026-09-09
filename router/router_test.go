@@ -776,6 +776,69 @@ func TestPrivateImageCatalogRestoresOwnedMediaAndExcludesPublicMedia(t *testing.
 	}
 }
 
+func TestPrivateMediaCatalogFiltersVideosAndKeepsTheDefaultImageOnly(t *testing.T) {
+	const owner = "private-media-kind-owner"
+	createdAt := time.Now().Format(time.RFC3339Nano)
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	items := []model.Media{
+		{ID: "private-kind-image", OwnerUID: owner, Source: model.MediaSourceUpload, ObjectKey: "images/private/private-media-kind-owner/image.png", ContentType: "image/png", CreatedAt: createdAt},
+		{ID: "private-kind-video", OwnerUID: owner, Source: model.MediaSourceUpload, ObjectKey: "videos/private/private-media-kind-owner/video.mp4", ContentType: "video/mp4", CreatedAt: createdAt},
+		{ID: "private-kind-other-video", OwnerUID: "private-media-kind-other", Source: model.MediaSourceUpload, ObjectKey: "videos/private/private-media-kind-other/video.mp4", ContentType: "video/mp4", CreatedAt: createdAt},
+		{ID: "private-kind-expiring-video", OwnerUID: owner, Source: model.MediaSourceUpload, ObjectKey: "videos/private/private-media-kind-owner/expiring.mp4", ContentType: "video/mp4", ExpiresAt: &expiresAt, CreatedAt: createdAt},
+		{ID: "private-kind-deleting-video", OwnerUID: owner, Source: model.MediaSourceUpload, ObjectKey: "videos/private/private-media-kind-owner/deleting.mp4", ContentType: "video/mp4", CleanupStatus: model.MediaCleanupDeleting, CreatedAt: createdAt},
+		{ID: "private-kind-public-video", OwnerUID: owner, Source: model.MediaSourceUpload, ObjectKey: "videos/public/private-media-kind-owner/public.mp4", ContentType: "video/mp4", CreatedAt: createdAt},
+	}
+	for _, item := range items {
+		if _, err := repository.SaveMedia(item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := repository.SavePublicImage(model.PublicImage{ID: "private-kind-public-record", MediaID: "private-kind-public-video", UploaderUID: owner, Title: "public", CreatedAt: createdAt}); err != nil {
+		t.Fatal(err)
+	}
+
+	readIDs := func(path string) ([]string, *httptest.ResponseRecorder) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("X-Portal-User-Uid", owner)
+		response := httptest.NewRecorder()
+		New().ServeHTTP(response, request)
+		var payload struct {
+			Code int `json:"code"`
+			Data struct {
+				Items []model.Media `json:"items"`
+				Total int           `json:"total"`
+			} `json:"data"`
+		}
+		if response.Code == http.StatusOK && json.Unmarshal(response.Body.Bytes(), &payload) == nil && payload.Code == 0 {
+			ids := make([]string, 0, len(payload.Data.Items))
+			for _, item := range payload.Data.Items {
+				ids = append(ids, item.ID)
+			}
+			if payload.Data.Total != len(ids) {
+				t.Fatalf("private media total = %d, items = %v", payload.Data.Total, ids)
+			}
+			return ids, response
+		}
+		return nil, response
+	}
+
+	for _, path := range []string{"/api/v1/private-images", "/api/v1/private-images?kind=image"} {
+		ids, response := readIDs(path)
+		if response.Code != http.StatusOK || len(ids) != 1 || ids[0] != "private-kind-image" {
+			t.Fatalf("image catalog %s = %d/%s, ids=%v", path, response.Code, response.Body.String(), ids)
+		}
+	}
+	videoIDs, videoResponse := readIDs("/api/v1/private-images?kind=video")
+	if videoResponse.Code != http.StatusOK || len(videoIDs) != 1 || videoIDs[0] != "private-kind-video" {
+		t.Fatalf("video catalog = %d/%s, ids=%v", videoResponse.Code, videoResponse.Body.String(), videoIDs)
+	}
+	_, invalidResponse := readIDs("/api/v1/private-images?kind=audio")
+	if invalidResponse.Code != http.StatusBadRequest || !strings.Contains(invalidResponse.Body.String(), `"code":1`) {
+		t.Fatalf("invalid private media kind = %d/%s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+}
+
 func TestPrivateImageCatalogPersistsFolderMoveAndRenamePerOwner(t *testing.T) {
 	owner := "private-catalog-editor"
 	item := model.Media{ID: "media-private-catalog-edit", OwnerUID: owner, Source: model.MediaSourceUpload, ObjectKey: "images/private/private-catalog-editor/edit.png", ContentType: "image/png", Filename: "edit.png", CreatedAt: time.Now().Format(time.RFC3339Nano)}

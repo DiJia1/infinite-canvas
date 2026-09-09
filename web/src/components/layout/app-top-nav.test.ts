@@ -13,9 +13,10 @@ test("top navigation returns to the Portal workbench and shows the directory nam
     assert.match(source, /session\.data\?\.user\.displayName/);
 });
 
-test("management navigation relies on the local session capability, not raw Portal roles", async () => {
+test("top navigation replaces management with the workflow library", async () => {
     const source = await readFile(sourceURL, "utf8");
 
-    assert.match(source, /session\.data\?\.isAdmin/);
-    assert.doesNotMatch(source, /session\.data\?\.user\.roles|portal-admin|portal-public-assets-manager/);
+    assert.match(source, /appPath\("\/workflows"\)/);
+    assert.match(source, />\s*自动化流程\s*</);
+    assert.doesNotMatch(source, />\s*管理\s*</);
 });

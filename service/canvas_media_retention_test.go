@@ -70,7 +70,7 @@ func TestUpdateCanvasProjectSchedulesOnlyRemovedUnreferencedMedia(t *testing.T) 
 	if stored.ExpiresAt.Before(before.Add(5*time.Minute).Truncate(time.Microsecond)) || stored.ExpiresAt.After(after.Add(5*time.Minute)) {
 		t.Fatalf("expires_at = %s, want between %s and %s", stored.ExpiresAt, before.Add(5*time.Minute), after.Add(5*time.Minute))
 	}
-	items, err := repository.ListPrivateMedia(ownerUID)
+	items, err := repository.ListPrivateMedia(ownerUID, repository.PrivateMediaKindImage)
 	if err != nil || len(items) != 0 {
 		t.Fatalf("ListPrivateMedia() = %#v, %v; pending media must be hidden", items, err)
 	}

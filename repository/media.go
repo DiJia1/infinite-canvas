@@ -79,14 +79,29 @@ func DeleteMedia(id string, contexts ...context.Context) error {
 	})
 }
 
-func ListPrivateMedia(ownerUID string) ([]model.Media, error) {
+type PrivateMediaKind string
+
+const (
+	PrivateMediaKindImage PrivateMediaKind = "image"
+	PrivateMediaKindVideo PrivateMediaKind = "video"
+)
+
+func ListPrivateMedia(ownerUID string, kind PrivateMediaKind) ([]model.Media, error) {
 	db, err := DB()
 	if err != nil {
 		return nil, err
 	}
 	items := make([]model.Media, 0)
-	err = db.Where("owner_uid = ?", ownerUID).
-		Where("content_type NOT LIKE ?", "video/%").
+	query := db.Where("owner_uid = ?", ownerUID)
+	switch kind {
+	case PrivateMediaKindImage:
+		query = query.Where("content_type NOT LIKE ?", "video/%")
+	case PrivateMediaKindVideo:
+		query = query.Where("content_type LIKE ?", "video/%")
+	default:
+		return nil, fmt.Errorf("invalid private media kind")
+	}
+	err = query.
 		Where("cleanup_status = ?", model.MediaCleanupActive).
 		Where("expires_at IS NULL").
 		Where("NOT EXISTS (SELECT 1 FROM public_images WHERE public_images.media_id = media.id)").

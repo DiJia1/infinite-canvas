@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -130,8 +131,13 @@ func PrivateImages(w http.ResponseWriter, r *http.Request) {
 		Fail(w, "未经过 Portal Gateway 身份验证")
 		return
 	}
-	result, err := service.ListPrivateImages(r.Context(), user)
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	result, err := service.ListPrivateImages(r.Context(), user, kind)
 	if err != nil {
+		if errors.Is(err, service.ErrInvalidPrivateMediaKind) {
+			FailStatus(w, http.StatusBadRequest, "素材类型无效")
+			return
+		}
 		FailError(w, err)
 		return
 	}

@@ -8,20 +8,24 @@ type Resources = { manager: VideoResourceManager; playback: Map<string, Playback
 const Context = createContext<Resources | null>(null);
 export function VideoResourceProvider({ projectId, nodeIds, children }: { projectId: string; nodeIds: string[]; children: ReactNode }) {
     const scope = useCanvasStore((s) => s.syncScope);
-    const resources = useMemo<Resources>(() => ({ manager: createVideoResourceManager(), playback: new Map() }), [scope, projectId]);
+    return <ScopedVideoResourceProvider scope={`${scope}:${projectId}`} nodeIds={nodeIds} resetOnCanvasScopeChange>{children}</ScopedVideoResourceProvider>;
+}
+
+export function ScopedVideoResourceProvider({ scope, nodeIds, children, resetOnCanvasScopeChange = false }: { scope: string; nodeIds: string[]; children: ReactNode; resetOnCanvasScopeChange?: boolean }) {
+    const resources = useMemo<Resources>(() => ({ manager: createVideoResourceManager(), playback: new Map() }), [scope]);
     useLayoutEffect(() => {
         const reset = () => {
             resources.manager.resetSession();
             resources.playback.clear();
         };
-        const unsubscribe = useCanvasStore.subscribe((state, previous) => {
+        const unsubscribe = resetOnCanvasScopeChange ? useCanvasStore.subscribe((state, previous) => {
             if (state.syncScope !== previous.syncScope) reset();
-        });
+        }) : () => undefined;
         return () => {
             unsubscribe();
             reset();
         };
-    }, [resources]);
+    }, [resetOnCanvasScopeChange, resources]);
     useEffect(() => {
         const ids = new Set(nodeIds);
         for (const id of resources.playback.keys()) if (!ids.has(id)) resources.playback.delete(id);

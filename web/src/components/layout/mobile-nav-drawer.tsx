@@ -1,11 +1,10 @@
 "use client";
 
 import { Drawer } from "antd";
-import { Images, Library } from "lucide-react";
+import { GitBranch, Images, Library } from "lucide-react";
 import Link from "next/link";
 
 import { navigationTools, type NavigationToolSlug } from "@/constant/navigation-tools";
-import { adminNavigationItems } from "@/components/layout/admin-navigation";
 import { appPath } from "@/lib/app-path";
 import { cn } from "@/lib/utils";
 
@@ -15,10 +14,10 @@ type MobileNavDrawerProps = {
     onClose: () => void;
     onOpenMyAssets: () => void;
     onOpenPublicAssets: () => void;
-    isAdmin: boolean;
+    workflowActive: boolean;
 };
 
-export function MobileNavDrawer({ open, activeToolSlug, onClose, onOpenMyAssets, onOpenPublicAssets, isAdmin }: MobileNavDrawerProps) {
+export function MobileNavDrawer({ open, activeToolSlug, onClose, onOpenMyAssets, onOpenPublicAssets, workflowActive }: MobileNavDrawerProps) {
     return (
         <Drawer title="导航" placement="left" size={280} open={open} onClose={onClose} className="md:hidden">
             <div className="space-y-1">
@@ -62,17 +61,17 @@ export function MobileNavDrawer({ open, activeToolSlug, onClose, onOpenMyAssets,
                     <Library className="size-5" />
                     <span>公共素材</span>
                 </button>
-                {isAdmin ? (
-                    adminNavigationItems.map((item) => {
-                        const Icon = item.icon;
-                        return (
-                            <Link key={item.key} href={appPath(item.href)} onClick={onClose} className="flex items-center gap-3 rounded-lg px-3 py-3 text-base text-stone-600 transition hover:bg-stone-100 hover:text-stone-950 dark:text-stone-300 dark:hover:bg-stone-800 dark:hover:text-stone-100">
-                                <Icon className="size-5" />
-                                <span>{item.label}</span>
-                            </Link>
-                        );
-                    })
-                ) : null}
+                <Link
+                    href={appPath("/workflows")}
+                    onClick={onClose}
+                    className={cn(
+                        "flex items-center gap-3 rounded-lg px-3 py-3 text-base transition",
+                        workflowActive ? "bg-stone-100 font-medium text-stone-950 dark:bg-stone-800 dark:text-stone-100" : "text-stone-600 hover:bg-stone-100 hover:text-stone-950 dark:text-stone-300 dark:hover:bg-stone-800 dark:hover:text-stone-100",
+                    )}
+                >
+                    <GitBranch className="size-5" />
+                    <span>自动化流程</span>
+                </Link>
             </div>
         </Drawer>
     );

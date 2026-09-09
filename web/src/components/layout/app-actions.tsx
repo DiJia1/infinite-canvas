@@ -12,9 +12,10 @@ import { useThemeStore } from "@/stores/use-theme-store";
 type AppActionsProps = {
     variant?: "default" | "canvas";
     onOpenShortcuts?: () => void;
+    onOpenSettings?: () => void;
 };
 
-export function AppActions({ variant = "default", onOpenShortcuts }: AppActionsProps) {
+export function AppActions({ variant = "default", onOpenShortcuts, onOpenSettings }: AppActionsProps) {
     const theme = useThemeStore((state) => state.theme);
     const setTheme = useThemeStore((state) => state.setTheme);
     const router = useRouter();
@@ -24,7 +25,7 @@ export function AppActions({ variant = "default", onOpenShortcuts }: AppActionsP
 
     return (
         <div className="inline-flex shrink-0 items-center gap-1.5">
-            <button type="button" className={className} style={style} onClick={() => router.push(appPath("/admin/settings"))} aria-label="配置" title="配置">
+            <button type="button" className={className} style={style} onClick={onOpenSettings || (() => router.push(appPath("/admin/settings")))} aria-label="配置" title="配置">
                 <Settings2 className="size-4" />
             </button>
             <AnimatedThemeToggler theme={theme} onThemeChange={setTheme} className={className} style={style} aria-label={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"} title={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"} />

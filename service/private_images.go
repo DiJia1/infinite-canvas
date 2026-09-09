@@ -2,12 +2,15 @@ package service
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 
 	"github.com/basketikun/infinite-canvas/model"
 	"github.com/basketikun/infinite-canvas/repository"
 )
+
+var ErrInvalidPrivateMediaKind = errors.New("invalid private media kind")
 
 func privateImageTitle(item model.Media) string {
 	if title := strings.TrimSpace(item.Title); title != "" {
@@ -20,11 +23,20 @@ func privateImageTitle(item model.Media) string {
 	return "图片"
 }
 
-func ListPrivateImages(_ context.Context, user PortalUser) (model.PrivateImageList, error) {
+func ListPrivateImages(_ context.Context, user PortalUser, requestedKind string) (model.PrivateImageList, error) {
 	if strings.TrimSpace(user.UID) == "" {
 		return model.PrivateImageList{}, safeMessageError{message: "未经过 Portal Gateway 身份验证"}
 	}
-	items, err := repository.ListPrivateMedia(user.UID)
+	kind := repository.PrivateMediaKindImage
+	switch strings.TrimSpace(requestedKind) {
+	case "", string(repository.PrivateMediaKindImage):
+		kind = repository.PrivateMediaKindImage
+	case string(repository.PrivateMediaKindVideo):
+		kind = repository.PrivateMediaKindVideo
+	default:
+		return model.PrivateImageList{}, ErrInvalidPrivateMediaKind
+	}
+	items, err := repository.ListPrivateMedia(user.UID, kind)
 	if err != nil {
 		return model.PrivateImageList{}, err
 	}

@@ -2,14 +2,13 @@
 
 import { Dropdown } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, Images, Library, Menu } from "lucide-react";
+import { ChevronDown, GitBranch, Images, Library, Menu } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
 
 import { AppActions } from "@/components/layout/app-actions";
 import { AppConfigModal } from "@/components/layout/app-config-modal";
-import { adminNavigationItems } from "@/components/layout/admin-navigation";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { MyAssetsDrawer } from "@/app/(user)/canvas/components/asset-picker-modal";
 import { PublicImageDrawer } from "@/app/(user)/canvas/components/public-image-drawer";
@@ -25,7 +24,7 @@ export function AppTopNav() {
     const pathname = usePathname();
     const [mobileNavOpen, setMobileNavOpen] = useState(false);
     const [materialPanel, setMaterialPanel] = useState<MaterialPanel>(null);
-    const hideHeader = /^\/canvas\/[^/]+/.test(pathname);
+    const hideHeader = /^\/(?:canvas|workflows)\/[^/]+/.test(pathname);
     const session = useQuery({ ...portalSessionQuery, enabled: !hideHeader });
     const slug = pathname.split("/").filter(Boolean)[0];
     const activeToolSlug = navigationTools.some((tool) => tool.slug === slug) ? (slug as NavigationToolSlug) : undefined;
@@ -87,14 +86,18 @@ export function AppTopNav() {
                                     <Library className="size-4" />
                                     公共素材
                                 </TopMaterialButton>
-                                {session.data?.isAdmin ? (
-                                    <Dropdown menu={{ items: adminNavigationItems.map((item) => ({ key: item.key, label: <Link href={appPath(item.href)}>{item.label}</Link> })) }} trigger={["click"]}>
-                                        <button type="button" className="relative flex h-16 shrink-0 items-center gap-1 text-sm leading-6 text-stone-500 transition hover:text-stone-950 dark:text-stone-400 dark:hover:text-stone-100">
-                                            管理
-                                            <ChevronDown className="size-3.5" />
-                                        </button>
-                                    </Dropdown>
-                                ) : null}
+                                <Link
+                                    href={appPath("/workflows")}
+                                    className={cn(
+                                        "relative flex h-16 shrink-0 items-center gap-2 text-sm leading-6 transition after:absolute after:inset-x-0 after:bottom-0 after:h-px",
+                                        pathname.startsWith("/workflows")
+                                            ? "font-medium text-stone-950 after:bg-stone-950 dark:text-stone-100 dark:after:bg-stone-100"
+                                            : "text-stone-500 after:bg-transparent hover:text-stone-950 dark:text-stone-400 dark:hover:text-stone-100",
+                                    )}
+                                >
+                                    <GitBranch className="size-4" />
+                                    自动化流程
+                                </Link>
                             </nav>
                         </div>
 
@@ -118,7 +121,7 @@ export function AppTopNav() {
                 onClose={() => setMobileNavOpen(false)}
                 onOpenMyAssets={() => setMaterialPanel("my-assets")}
                 onOpenPublicAssets={() => setMaterialPanel("public-assets")}
-                isAdmin={Boolean(session.data?.isAdmin)}
+                workflowActive={pathname.startsWith("/workflows")}
             />
             <AppConfigModal />
             <MyAssetsDrawer open={materialPanel === "my-assets"} onClose={() => setMaterialPanel(null)} />

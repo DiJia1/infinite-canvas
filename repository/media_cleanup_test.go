@@ -20,7 +20,7 @@ func TestListPrivateMediaExcludesMediaPendingCleanup(t *testing.T) {
 		}
 	}
 
-	items, err := ListPrivateMedia("owner")
+	items, err := ListPrivateMedia("owner", PrivateMediaKindImage)
 	if err != nil {
 		t.Fatalf("ListPrivateMedia(): %v", err)
 	}
