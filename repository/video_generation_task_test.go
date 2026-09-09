@@ -148,6 +148,22 @@ func TestVideoCompletionRollsBackAndCanConverge(t *testing.T) {
 		t.Fatalf("audit %+v", op)
 	}
 }
+
+func TestVideoCompletionRejectsResultOwnedByAnotherUser(t *testing.T) {
+	item, current := videoFixture(t)
+	createVideoFixture(t, item)
+	task, _, _ := ClaimNextVideoGenerationTask(current)
+	if err := UpdateClaimedVideoTask(task, map[string]any{"status": "saving", "provider_task_id": "upstream"}); err != nil {
+		t.Fatal(err)
+	}
+	foreign := model.Media{ID: "foreign-result", OwnerUID: "another-owner", ObjectKey: "foreign-result.mp4", ContentType: "video/mp4"}
+	if err := CompleteVideoGenerationTask(task, []model.Media{foreign}); err == nil {
+		t.Fatal("video completion accepted a cross-owner result")
+	}
+	if _, found, err := GetMedia(foreign.ID); err != nil || found {
+		t.Fatalf("cross-owner result committed: found=%t err=%v", found, err)
+	}
+}
 func TestVideoCanvasStableReferenceAndMalformedJSON(t *testing.T) {
 	ids, err := CanvasDocumentMediaIDs([]byte(`{"nodes":[{"type":"video","metadata":{"mediaId":"remote"}}]}`))
 	if err != nil {

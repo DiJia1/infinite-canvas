@@ -170,7 +170,7 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
         );
         return references.every(Boolean) ? (references as ReferenceImage[]) : null;
     };
-    const imageTaskError = (task: ImageGenerationTask) => task.error || "图片生成失败";
+    const imageTaskError = (task: ImageGenerationTask) => task.error || (task.status === "uncertain" ? "提交结果待确认，请勿重复生成" : "图片生成失败");
     const setImageTaskState = (nodeId: string, task: ImageGenerationTask) => {
         options.setNodes((previous) =>
             previous.map((node) =>
@@ -181,8 +181,8 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
                               ...node.metadata,
                               imageTaskId: task.id,
                               imageTaskClientRequestId: task.clientRequestId || node.metadata?.imageTaskClientRequestId,
-                              status: task.status === "failed" ? NODE_STATUS_ERROR : task.status === "succeeded" ? NODE_STATUS_SUCCESS : NODE_STATUS_LOADING,
-                              errorDetails: task.status === "failed" ? imageTaskError(task) : undefined,
+                              status: (task.status === "failed" || task.status === "uncertain") ? NODE_STATUS_ERROR : task.status === "succeeded" ? NODE_STATUS_SUCCESS : NODE_STATUS_LOADING,
+                              errorDetails: (task.status === "failed" || task.status === "uncertain") ? imageTaskError(task) : undefined,
                           },
                       }
                     : node,
@@ -239,7 +239,7 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
                     await completeImageTaskNode(nodeId, rootId, task);
                     return;
                 }
-                if (task.status === "failed") throw new Error(imageTaskError(task));
+                if ((task.status === "failed" || task.status === "uncertain")) throw new Error(imageTaskError(task));
                 await new Promise<void>((resolve) => window.setTimeout(resolve, 2_000));
                 task = await options.getImageTask(task.id);
             }
@@ -266,7 +266,7 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
                 throw error;
             }
         }
-        if (task.status === "succeeded" || task.status === "failed") {
+        if (task.status === "succeeded" || (task.status === "failed" || task.status === "uncertain")) {
             await observeImageTask(nodeId, rootId, task);
             return;
         }
@@ -598,6 +598,20 @@ export function createCanvasGenerationController(initialOptions: CanvasGeneratio
     };
 
     const retryNode = async (node: CanvasNodeData) => {
+        if (node.type === CanvasNodeType.Image && node.metadata?.status === NODE_STATUS_ERROR && (node.metadata.imageTaskId || node.metadata.imageTaskClientRequestId)) {
+            try {
+                const task = node.metadata.imageTaskId
+                    ? await options.getImageTask(node.metadata.imageTaskId)
+                    : await options.getImageTaskByClientRequest(node.metadata.imageTaskClientRequestId!);
+                if (task.status !== "failed") {
+                    await observeImageTask(node.id, node.metadata.batchRootId || node.id, task);
+                    return;
+                }
+            } catch (error) {
+                options.message.error(error instanceof Error ? error.message : "查询原图片任务失败，请稍后重试");
+                return;
+            }
+        }
         if (node.type === CanvasNodeType.Video && (node.metadata?.videoTaskId || node.metadata?.videoTaskClientRequestId)) {
             const scope = options.getSessionScope?.() ?? options.sessionScope;
             const operation = beginVideoOperation(node.id);

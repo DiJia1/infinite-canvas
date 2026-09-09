@@ -2,9 +2,11 @@ package repository
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/basketikun/infinite-canvas/model"
 	"github.com/shopspring/decimal"
@@ -70,11 +72,12 @@ func TestImageGenerationTaskLookupAndClaimAreOwnerScoped(t *testing.T) {
 	if _, found, err := GetImageGenerationTaskForOwner("task-1", "user-2"); err != nil || found {
 		t.Fatalf("cross-owner lookup = found %v, err %v", found, err)
 	}
-	claimed, found, err := ClaimNextImageGenerationTask("2026-08-24T09:59:00Z", "2026-08-24T10:01:00Z")
-	if err != nil || !found || claimed.ID != "task-1" || claimed.Status != model.ImageTaskSubmitting {
+	current := time.Now().UTC()
+	claimed, found, err := ClaimNextImageGenerationTask(current, 45*time.Second)
+	if err != nil || !found || claimed.ID != "task-1" || claimed.Status != model.ImageTaskQueued || claimed.ClaimID == "" || claimed.LeaseUntil == nil || !claimed.LeaseUntil.Equal(current.Add(45*time.Second)) {
 		t.Fatalf("ClaimNextImageGenerationTask() = %#v, %v, %v", claimed, found, err)
 	}
-	if _, found, err := ClaimNextImageGenerationTask("2026-08-24T09:59:00Z", "2026-08-24T10:02:00Z"); err != nil || found {
+	if _, found, err := ClaimNextImageGenerationTask(current.Add(time.Second), 45*time.Second); err != nil || found {
 		t.Fatalf("second claim = found %v, err %v", found, err)
 	}
 }
@@ -88,7 +91,7 @@ func TestClaimNextImageGenerationTaskDoesNotLogAnEmptyQueueAsAnError(t *testing.
 	}
 	db = database.Session(&gorm.Session{Logger: logger.New(log.New(&logs, "", 0), logger.Config{LogLevel: logger.Warn})})
 
-	_, found, err := ClaimNextImageGenerationTask("2026-09-02T12:00:00Z", "2026-09-02T12:00:01Z")
+	_, found, err := ClaimNextImageGenerationTask(time.Date(2026, 9, 2, 12, 0, 1, 0, time.UTC), 45*time.Second)
 	if err != nil || found {
 		t.Fatalf("empty claim = found %v, err %v", found, err)
 	}
@@ -109,14 +112,15 @@ func TestClaimNextImageGenerationTaskOrdersEqualCreatedAtByID(t *testing.T) {
 		}
 	}
 
-	claimed, found, err := ClaimNextImageGenerationTask("", "2026-09-02T12:00:01Z")
+	claimed, found, err := ClaimNextImageGenerationTask(time.Now().UTC(), 45*time.Second)
 	if err != nil || !found || claimed.ID != "task-a" {
 		t.Fatalf("ClaimNextImageGenerationTask() = %#v, %v, %v", claimed, found, err)
 	}
 }
 
-func TestClaimNextImageGenerationTaskDoesNotOverwriteALeaseRenewedAfterSelection(t *testing.T) {
+func TestImageGenerationTaskClaimFencesAnExpiredWorker(t *testing.T) {
 	useImageTaskTestDB(t)
+	current := time.Now().UTC()
 	item := model.ImageGenerationTask{
 		ID:              "task-stale",
 		OwnerUID:        "user-1",
@@ -128,53 +132,40 @@ func TestClaimNextImageGenerationTaskDoesNotOverwriteALeaseRenewedAfterSelection
 	if _, _, err := CreateImageGenerationTask(item); err != nil {
 		t.Fatalf("CreateImageGenerationTask() error = %v", err)
 	}
-
-	database, err := DB()
-	if err != nil {
-		t.Fatal(err)
-	}
-	const callbackName = "test:renew_image_task_lease_after_claim_selection"
-	const renewedAt = "2026-09-02T12:00:05Z"
-	var callbackErr error
-	callbackFired := false
-	if err := database.Callback().Query().After("gorm:query").Register(callbackName, func(transaction *gorm.DB) {
-		if callbackFired || transaction.Statement.Table != "image_generation_tasks" {
-			return
-		}
-		candidate, ok := transaction.Statement.Dest.(*model.ImageGenerationTask)
-		if !ok || candidate.ID != item.ID {
-			return
-		}
-		callbackFired = true
-		callbackErr = transaction.Session(&gorm.Session{NewDB: true}).Exec(
-			"UPDATE image_generation_tasks SET updated_at = ? WHERE id = ?",
-			renewedAt,
-			item.ID,
-		).Error
-	}); err != nil {
-		t.Fatalf("register query callback: %v", err)
-	}
-
-	claimed, found, err := ClaimNextImageGenerationTask("2026-09-02T11:30:00Z", "2026-09-02T12:00:10Z")
-	if err != nil {
-		t.Fatalf("ClaimNextImageGenerationTask() error = %v", err)
-	}
-	if callbackErr != nil {
-		t.Fatalf("simulated lease renewal error = %v", callbackErr)
-	}
-	if !callbackFired {
-		t.Fatal("simulated lease renewal did not run")
-	}
-	if found {
-		t.Fatalf("ClaimNextImageGenerationTask() overwrote a renewed lease: %#v", claimed)
-	}
-
-	stored, found, err := GetImageGenerationTask(item.ID)
+	first, found, err := ClaimNextImageGenerationTask(current, 45*time.Second)
 	if err != nil || !found {
-		t.Fatalf("GetImageGenerationTask() = %#v, %v, %v", stored, found, err)
+		t.Fatalf("first claim = %#v, %v, %v", first, found, err)
 	}
-	if stored.UpdatedAt != renewedAt {
-		t.Fatalf("renewed lease updated_at = %q, want %q", stored.UpdatedAt, renewedAt)
+	second, found, err := ClaimNextImageGenerationTask(current.Add(time.Minute), 45*time.Second)
+	if err != nil || !found || second.ClaimID == first.ClaimID {
+		t.Fatalf("replacement claim = %#v, %v, %v", second, found, err)
+	}
+	if err := UpdateClaimedImageGenerationTask(first, map[string]any{"status": model.ImageTaskFailed}); !errors.Is(err, ErrImageLeaseLost) {
+		t.Fatalf("expired worker write = %v, want ErrImageLeaseLost", err)
+	}
+	if err := UpdateClaimedImageGenerationTask(second, map[string]any{"status": model.ImageTaskRunning}); err != nil {
+		t.Fatalf("current worker write = %v", err)
+	}
+}
+
+func TestImageGenerationTaskRejectsWritesAfterItsLeaseExpiresWithoutReplacement(t *testing.T) {
+	useImageTaskTestDB(t)
+	item := model.ImageGenerationTask{
+		ID: "task-expired", OwnerUID: "user-1", ClientRequestID: "client-expired", Status: model.ImageTaskRunning,
+		CreatedAt: "2026-09-02T11:00:00Z", UpdatedAt: "2026-09-02T11:00:00Z",
+	}
+	if _, _, err := CreateImageGenerationTask(item); err != nil {
+		t.Fatalf("CreateImageGenerationTask() error = %v", err)
+	}
+	claimed, found, err := ClaimNextImageGenerationTask(time.Now().UTC().Add(-time.Minute), 10*time.Second)
+	if err != nil || !found {
+		t.Fatalf("expired claim fixture = %#v, %t, %v", claimed, found, err)
+	}
+	if err := UpdateClaimedImageGenerationTask(claimed, map[string]any{"status": model.ImageTaskSucceeded}); !errors.Is(err, ErrImageLeaseLost) {
+		t.Fatalf("write after lease expiry = %v, want ErrImageLeaseLost", err)
+	}
+	if renewed, err := RenewImageGenerationTaskLease(claimed, time.Now().UTC(), 45*time.Second); err != nil || renewed {
+		t.Fatalf("renew after lease expiry = %t, %v", renewed, err)
 	}
 }
 
@@ -192,12 +183,116 @@ func TestRenewImageGenerationTaskLeasePreventsASecondWorkerFromReclaimingAnActiv
 		t.Fatalf("CreateImageGenerationTask() error = %v", err)
 	}
 
-	renewed, err := RenewImageGenerationTaskLease(item.ID, "2026-08-27T10:00:40Z")
+	current := time.Now().UTC()
+	claimed, found, err := ClaimNextImageGenerationTask(current, 45*time.Second)
+	if err != nil || !found {
+		t.Fatalf("ClaimNextImageGenerationTask() = %#v, %v, %v", claimed, found, err)
+	}
+	renewedAt := current.Add(40 * time.Second)
+	renewed, err := RenewImageGenerationTaskLease(claimed, renewedAt, 45*time.Second)
 	if err != nil || !renewed {
 		t.Fatalf("RenewImageGenerationTaskLease() = %v, %v", renewed, err)
 	}
 
-	if _, claimed, err := ClaimNextImageGenerationTask("2026-08-27T10:00:20Z", "2026-08-27T10:01:00Z"); err != nil || claimed {
-		t.Fatalf("ClaimNextImageGenerationTask() reclaimed an active task: claimed=%v, err=%v", claimed, err)
+	if _, found, err := ClaimNextImageGenerationTask(renewedAt.Add(30*time.Second), 45*time.Second); err != nil || found {
+		t.Fatalf("ClaimNextImageGenerationTask() reclaimed an active task: claimed=%v, err=%v", found, err)
 	}
 }
+
+func TestCompleteImageGenerationTaskPublishesMediaWorkflowHoldAndAuditAtomically(t *testing.T) {
+	useImageTaskTestDB(t)
+	database, err := DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := time.Now().UTC()
+	leaseUntil := current.Add(time.Minute)
+	task := model.ImageGenerationTask{
+		ID: "image-complete", OwnerUID: "image-owner", ClientRequestID: "workflow-image-request",
+		Status: model.ImageTaskRunning, ProviderTaskID: "upstream-image", OperationLogID: "image-complete-operation",
+		ClaimID: "image-complete-claim", LeaseUntil: &leaseUntil, CreatedAt: current.Format(time.RFC3339), UpdatedAt: current.Format(time.RFC3339),
+	}
+	if err := database.Create(&model.OperationLog{ID: task.OperationLogID, ActorUID: task.OwnerUID, Status: model.OperationStatusSubmitted, CreatedAt: current}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := CreateImageGenerationTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&model.WorkflowRun{ID: "image-complete-run", OwnerUID: task.OwnerUID, RequestID: "image-complete-run-request", Status: "running"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&model.WorkflowOutputAttempt{
+		ID: "image-complete-attempt", RunID: "image-complete-run", NodeID: "node", SlotID: "slot", Attempt: 1,
+		OwnerUID: task.OwnerUID, RequestID: task.ClientRequestID, Status: "running",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	result := model.Media{ID: "image-complete-result", OwnerUID: task.OwnerUID, Source: model.MediaSourceGenerated, ObjectKey: "image/complete.png", ContentType: "image/png", CreatedAt: current.Format(time.RFC3339)}
+	if err := CompleteImageGenerationTask(task, []model.Media{result}); err != nil {
+		t.Fatal(err)
+	}
+	stored, found, err := GetImageGenerationTask(task.ID)
+	if err != nil || !found || stored.Status != model.ImageTaskSucceeded || stored.ResultMediaIDsJSON != `["image-complete-result"]` || stored.ClaimID != "" || stored.LeaseUntil != nil {
+		t.Fatalf("completed task = %#v, found=%t, err=%v", stored, found, err)
+	}
+	if media, found, err := GetMedia(result.ID); err != nil || !found || media.OwnerUID != task.OwnerUID {
+		t.Fatalf("result media = %#v, found=%t, err=%v", media, found, err)
+	}
+	var refs []model.WorkflowMediaRef
+	if err := database.Where("media_id = ?", result.ID).Find(&refs).Error; err != nil || len(refs) != 1 || refs[0].ScopeID != "image-complete-run" {
+		t.Fatalf("workflow result refs = %+v, err=%v", refs, err)
+	}
+	var operation model.OperationLog
+	if err := database.First(&operation, "id = ?", task.OperationLogID).Error; err != nil || operation.Status != model.OperationStatusSuccess || len(operation.MediaIDs) != 1 || operation.MediaIDs[0] != result.ID {
+		t.Fatalf("operation = %#v, err=%v", operation, err)
+	}
+}
+
+func TestCompleteImageGenerationTaskRejectsExpiredLeaseBeforePublishingMedia(t *testing.T) {
+	useImageTaskTestDB(t)
+	past := time.Now().UTC().Add(-time.Minute)
+	task := model.ImageGenerationTask{
+		ID: "image-expired-complete", OwnerUID: "image-owner", ClientRequestID: "image-expired-request",
+		Status: model.ImageTaskRunning, ClaimID: "expired-claim", LeaseUntil: &past, CreatedAt: nowStringForRepositoryTest(), UpdatedAt: nowStringForRepositoryTest(),
+	}
+	if _, _, err := CreateImageGenerationTask(task); err != nil {
+		t.Fatal(err)
+	}
+	result := model.Media{ID: "image-expired-result", OwnerUID: task.OwnerUID, ObjectKey: "image/expired.png", ContentType: "image/png"}
+	if err := CompleteImageGenerationTask(task, []model.Media{result}); !errors.Is(err, ErrImageLeaseLost) {
+		t.Fatalf("CompleteImageGenerationTask() error = %v, want ErrImageLeaseLost", err)
+	}
+	if _, found, err := GetMedia(result.ID); err != nil || found {
+		t.Fatalf("expired worker published result: found=%t err=%v", found, err)
+	}
+	stored, found, err := GetImageGenerationTask(task.ID)
+	if err != nil || !found || stored.Status != model.ImageTaskRunning || stored.ClaimID != task.ClaimID {
+		t.Fatalf("expired task mutated = %#v, found=%t, err=%v", stored, found, err)
+	}
+}
+
+func TestCompleteImageGenerationTaskRollsBackWhenAuditCannotBeCompleted(t *testing.T) {
+	useImageTaskTestDB(t)
+	future := time.Now().UTC().Add(time.Minute)
+	task := model.ImageGenerationTask{
+		ID: "image-audit-rollback", OwnerUID: "image-owner", ClientRequestID: "image-audit-request",
+		Status: model.ImageTaskRunning, OperationLogID: "missing-image-operation", ClaimID: "image-audit-claim", LeaseUntil: &future,
+		CreatedAt: nowStringForRepositoryTest(), UpdatedAt: nowStringForRepositoryTest(),
+	}
+	if _, _, err := CreateImageGenerationTask(task); err != nil {
+		t.Fatal(err)
+	}
+	result := model.Media{ID: "image-audit-result", OwnerUID: task.OwnerUID, ObjectKey: "image/audit.png", ContentType: "image/png"}
+	if err := CompleteImageGenerationTask(task, []model.Media{result}); err == nil {
+		t.Fatal("completion without its audit record succeeded")
+	}
+	if _, found, err := GetMedia(result.ID); err != nil || found {
+		t.Fatalf("failed atomic completion published media: found=%t err=%v", found, err)
+	}
+	stored, found, err := GetImageGenerationTask(task.ID)
+	if err != nil || !found || stored.Status != model.ImageTaskRunning || stored.ClaimID != task.ClaimID {
+		t.Fatalf("failed atomic completion mutated task = %#v, found=%t, err=%v", stored, found, err)
+	}
+}
+
+func nowStringForRepositoryTest() string { return time.Now().UTC().Format(time.RFC3339) }

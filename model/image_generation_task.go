@@ -1,6 +1,10 @@
 package model
 
-import "github.com/shopspring/decimal"
+import (
+	"time"
+
+	"github.com/shopspring/decimal"
+)
 
 type ImageGenerationTaskStatus string
 
@@ -10,6 +14,7 @@ const (
 	ImageTaskRunning    ImageGenerationTaskStatus = "running"
 	ImageTaskSucceeded  ImageGenerationTaskStatus = "succeeded"
 	ImageTaskFailed     ImageGenerationTaskStatus = "failed"
+	ImageTaskUncertain  ImageGenerationTaskStatus = "uncertain"
 )
 
 type ImageGenerationTask struct {
@@ -36,6 +41,8 @@ type ImageGenerationTask struct {
 	RequestSummary      string                    `json:"-" gorm:"type:text"`
 	OperationLogID      string                    `json:"-" gorm:"index"`
 	ProviderTaskID      string                    `json:"-" gorm:"index"`
+	ClaimID             string                    `json:"-" gorm:"index"`
+	LeaseUntil          *time.Time                `json:"-" gorm:"index"`
 	Progress            int                       `json:"progress"`
 	ResultMediaIDsJSON  string                    `json:"-"`
 	ErrorMessage        string                    `json:"error,omitempty"`

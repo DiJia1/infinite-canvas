@@ -3,7 +3,7 @@ import test from "node:test";
 
 import axios from "axios";
 
-import { uploadUserImage } from "./image";
+import { getImageGenerationTask, uploadUserImage } from "./image";
 
 type AxiosPost = typeof axios.post;
 
@@ -122,5 +122,18 @@ test("keeps the multipart upload fallback for local storage and reports progress
         assert.deepEqual(progress, [25]);
     } finally {
         restorePost();
+    }
+});
+
+
+test("preserves uncertain image task state instead of treating it as a new failure", async () => {
+    const previous = axios.get;
+    axios.get = (async () => ({ data: { code: 0, data: { id: "task-uncertain", status: "uncertain", error: "提交结果待确认", images: [] } } })) as typeof axios.get;
+    try {
+        const task = await getImageGenerationTask("task-uncertain");
+        assert.equal(task.status, "uncertain");
+        assert.equal(task.error, "提交结果待确认");
+    } finally {
+        axios.get = previous;
     }
 });

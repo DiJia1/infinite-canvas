@@ -27,7 +27,7 @@ export type GeneratedImage = { id: string; dataUrl: string; mediaId?: string };
 export type ImageGenerationTask = {
     id: string;
     clientRequestId: string;
-    status: "queued" | "submitting" | "running" | "succeeded" | "failed";
+    status: "queued" | "submitting" | "running" | "succeeded" | "failed" | "uncertain";
     progress: number;
     error?: string;
     images: GeneratedImage[];
@@ -75,7 +75,7 @@ function parseImageTask(payload: ImageApiResponse): ImageGenerationTask {
     return {
         id: item.id,
         clientRequestId: typeof item.clientRequestId === "string" ? item.clientRequestId : "",
-        status: item.status === "queued" || item.status === "submitting" || item.status === "running" || item.status === "succeeded" || item.status === "failed" ? item.status : "failed",
+        status: item.status === "queued" || item.status === "submitting" || item.status === "running" || item.status === "succeeded" || item.status === "failed" || item.status === "uncertain" ? item.status : "failed",
         progress: typeof item.progress === "number" ? item.progress : 0,
         error: typeof item.error === "string" ? item.error : undefined,
         images,

@@ -711,3 +711,16 @@ test("transient video observation failures retry three times then preserve the o
         globalThis.setTimeout = set;
     }
 });
+
+
+test("retrying an uncertain image observes the original task without a new submission", async () => {
+    const source = node("uncertain-image", CanvasNodeType.Image, { status: "error", imageTaskId: "original", prompt: "image" });
+    const { controller, calls, nodesRef } = setup([source], [], {
+        getImageTask: async () => ({ id: "original", clientRequestId: "original-client", status: "uncertain", progress: 0, images: [], error: "提交结果待确认" }),
+    });
+    await controller.retryNode(source);
+    assert.equal(calls.generation, 0);
+    assert.equal(calls.edit, 0);
+    assert.equal(nodesRef.current[0].metadata?.imageTaskId, "original");
+    assert.equal(nodesRef.current[0].metadata?.errorDetails, "提交结果待确认");
+});

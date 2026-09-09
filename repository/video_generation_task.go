@@ -154,6 +154,9 @@ func CompleteVideoGenerationTask(item model.VideoGenerationTask, media []model.M
 		}
 		ids := make([]string, 0, len(media))
 		for _, m := range media {
+			if m.ID == "" || m.OwnerUID != task.OwnerUID {
+				return errors.New("video task result media owner mismatch")
+			}
 			if err := tx.Create(&m).Error; err != nil {
 				return err
 			}

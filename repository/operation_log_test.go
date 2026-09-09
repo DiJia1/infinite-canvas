@@ -64,7 +64,7 @@ func TestSetImageGenerationTaskProviderTaskIDUpdatesLinkedOperationLog(t *testin
 		ID:              "task-provider-id",
 		OwnerUID:        "user-1",
 		ClientRequestID: "request-provider-id",
-		Status:          model.ImageTaskSubmitting,
+		Status:          model.ImageTaskQueued,
 		OperationLogID:  "operation-provider-id",
 		CreatedAt:       createdAt.Format(time.RFC3339),
 		UpdatedAt:       createdAt.Format(time.RFC3339),
@@ -82,7 +82,14 @@ func TestSetImageGenerationTaskProviderTaskIDUpdatesLinkedOperationLog(t *testin
 		t.Fatalf("CreateImageGenerationTaskWithOperationLog() = inserted %t, err %v", inserted, err)
 	}
 
-	if err := SetImageGenerationTaskProviderTaskID(task.ID, task.OperationLogID, "maizi-task-456", "2026-08-27T09:20:00Z"); err != nil {
+	claimed, found, err := ClaimNextImageGenerationTask(createdAt, 45*time.Second)
+	if err != nil || !found {
+		t.Fatalf("ClaimNextImageGenerationTask() = %#v, %t, %v", claimed, found, err)
+	}
+	if err := UpdateClaimedImageGenerationTask(claimed, map[string]any{"status": model.ImageTaskSubmitting}); err != nil {
+		t.Fatalf("enter submitting state: %v", err)
+	}
+	if err := SetImageGenerationTaskProviderTaskID(claimed, "maizi-task-456", "2026-08-27T09:20:00Z"); err != nil {
 		t.Fatalf("SetImageGenerationTaskProviderTaskID() error = %v", err)
 	}
 	updatedTask, found, err := GetImageGenerationTask(task.ID)

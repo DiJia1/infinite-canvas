@@ -2,11 +2,57 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io/fs"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/basketikun/infinite-canvas/ai"
+	"github.com/basketikun/infinite-canvas/config"
+	"github.com/basketikun/infinite-canvas/model"
+	"github.com/basketikun/infinite-canvas/repository"
 )
+
+type recoveredSubmittingImageProvider struct {
+	calls  int
+	result ai.ImageTask
+	err    error
+}
+
+type transientPollingImageProvider struct {
+	createCalls int
+	pollCalls   int
+}
+
+func (provider *transientPollingImageProvider) CreateImageTask(context.Context, ai.ImageTaskRequest) (ai.ImageTask, error) {
+	provider.createCalls++
+	return ai.ImageTask{}, errors.New("must not create a replacement task")
+}
+
+func (provider *transientPollingImageProvider) GetImageTask(context.Context, string) (ai.ImageTask, error) {
+	provider.pollCalls++
+	return ai.ImageTask{}, errors.New("temporary provider query failure")
+}
+
+func (provider *transientPollingImageProvider) SummarizeImageTaskRequest(ai.ImageTaskRequest) (ai.ImageTaskRequestSummary, error) {
+	return ai.ImageTaskRequestSummary{}, nil
+}
+
+func (provider *recoveredSubmittingImageProvider) CreateImageTask(context.Context, ai.ImageTaskRequest) (ai.ImageTask, error) {
+	provider.calls++
+	return provider.result, provider.err
+}
+
+func (provider *recoveredSubmittingImageProvider) GetImageTask(context.Context, string) (ai.ImageTask, error) {
+	provider.calls++
+	return ai.ImageTask{}, errors.New("must not poll without an upstream task")
+}
+
+func (provider *recoveredSubmittingImageProvider) SummarizeImageTaskRequest(ai.ImageTaskRequest) (ai.ImageTaskRequestSummary, error) {
+	return ai.ImageTaskRequestSummary{}, nil
+}
 
 func TestImageTaskWorkerConcurrencyDefaultsAndRejectsInvalidValues(t *testing.T) {
 	if value, err := parseImageTaskWorkerConcurrency(0); err != nil || value != 4 {
@@ -80,5 +126,163 @@ func TestImageTaskTerminalResultHandlesDirectURLsAndProviderFailures(t *testing.
 	urls, failure, terminal = imageTaskTerminalResult(ai.ImageTask{Status: "processing"})
 	if terminal || failure != nil || len(urls) != 0 {
 		t.Fatalf("processing result = %#v, %v, %t", urls, failure, terminal)
+	}
+}
+
+func TestRecoveredSubmittingImageTaskWithoutProviderIDBecomesUncertainWithoutResubmission(t *testing.T) {
+	provider := &recoveredSubmittingImageProvider{err: errors.New("must not resubmit")}
+	providerType := newID("recovered-image-provider")
+	if err := ai.Register(ai.ProviderType{
+		ID: providerType, Name: providerType, Capabilities: []ai.Capability{ai.CapabilityImageGenerate},
+		New: func(json.RawMessage) (ai.Provider, error) { return provider, nil },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	leaseUntil := time.Now().UTC().Add(time.Minute)
+	item := model.ImageGenerationTask{
+		ID: newID("recovered-image-task"), OwnerUID: "recovered-owner", ClientRequestID: newID("recovered-request"),
+		Mode: ImageTaskModeGeneration, Status: model.ImageTaskSubmitting, ProviderType: providerType,
+		ReferencesJSON: "[]", ClaimID: "recovered-claim", LeaseUntil: &leaseUntil,
+		CreatedAt: now(), UpdatedAt: now(),
+	}
+	if _, inserted, err := repository.CreateImageGenerationTask(item); err != nil || !inserted {
+		t.Fatalf("CreateImageGenerationTask() = inserted %t, err %v", inserted, err)
+	}
+	t.Cleanup(func() { _ = repository.DeleteImageGenerationTask(item.ID) })
+
+	executeImageTask(context.Background(), item)
+
+	stored, found, err := repository.GetImageGenerationTask(item.ID)
+	if err != nil || !found {
+		t.Fatalf("GetImageGenerationTask() = %#v, %t, %v", stored, found, err)
+	}
+	if provider.calls != 0 || stored.Status != model.ImageTaskUncertain || stored.ClaimID != "" || stored.LeaseUntil != nil {
+		t.Fatalf("recovered task = %#v, provider calls = %d", stored, provider.calls)
+	}
+}
+
+func TestImageTaskSubmissionErrorOrMissingProviderIDBecomesUncertain(t *testing.T) {
+	for _, fixture := range []struct {
+		name     string
+		provider *recoveredSubmittingImageProvider
+	}{
+		{name: "submission error", provider: &recoveredSubmittingImageProvider{err: errors.New("connection reset")}},
+		{name: "missing provider task ID", provider: &recoveredSubmittingImageProvider{result: ai.ImageTask{Status: "processing"}}},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			providerType := newID("uncertain-image-provider")
+			if err := ai.Register(ai.ProviderType{
+				ID: providerType, Name: providerType, Capabilities: []ai.Capability{ai.CapabilityImageGenerate},
+				New: func(json.RawMessage) (ai.Provider, error) { return fixture.provider, nil },
+			}); err != nil {
+				t.Fatal(err)
+			}
+			leaseUntil := time.Now().UTC().Add(time.Minute)
+			item := model.ImageGenerationTask{
+				ID: newID("uncertain-image-task"), OwnerUID: "uncertain-owner", ClientRequestID: newID("uncertain-request"),
+				Mode: ImageTaskModeGeneration, Status: model.ImageTaskQueued, ProviderType: providerType,
+				ReferencesJSON: "[]", RequestSummary: "{}", ClaimID: "uncertain-claim", LeaseUntil: &leaseUntil,
+				CreatedAt: now(), UpdatedAt: now(),
+			}
+			if _, inserted, err := repository.CreateImageGenerationTask(item); err != nil || !inserted {
+				t.Fatalf("CreateImageGenerationTask() = inserted %t, err %v", inserted, err)
+			}
+			t.Cleanup(func() { _ = repository.DeleteImageGenerationTask(item.ID) })
+
+			executeImageTask(context.Background(), item)
+
+			stored, found, err := repository.GetImageGenerationTask(item.ID)
+			if err != nil || !found || stored.Status != model.ImageTaskUncertain || fixture.provider.calls != 1 {
+				t.Fatalf("submitted task = %#v, found = %t, provider calls = %d, err = %v", stored, found, fixture.provider.calls, err)
+			}
+		})
+	}
+}
+
+func TestImageTaskPollingFailureKeepsOriginalProviderTaskForRetry(t *testing.T) {
+	provider := &transientPollingImageProvider{}
+	providerType := newID("polling-image-provider")
+	if err := ai.Register(ai.ProviderType{
+		ID: providerType, Name: providerType, Capabilities: []ai.Capability{ai.CapabilityImageGenerate},
+		New: func(json.RawMessage) (ai.Provider, error) { return provider, nil },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	leaseUntil := time.Now().UTC().Add(time.Minute)
+	item := model.ImageGenerationTask{
+		ID: newID("polling-image-task"), OwnerUID: newID("polling-owner"), ClientRequestID: newID("polling-request"),
+		Mode: ImageTaskModeGeneration, Status: model.ImageTaskRunning, ProviderType: providerType, ProviderTaskID: "original-upstream-task",
+		ReferencesJSON: "[]", ClaimID: "polling-claim", LeaseUntil: &leaseUntil, CreatedAt: now(), UpdatedAt: now(),
+	}
+	if _, inserted, err := repository.CreateImageGenerationTask(item); err != nil || !inserted {
+		t.Fatalf("CreateImageGenerationTask() = inserted %t, err %v", inserted, err)
+	}
+	t.Cleanup(func() { _ = repository.DeleteImageGenerationTask(item.ID) })
+
+	executeImageTask(context.Background(), item)
+	stored, found, err := repository.GetImageGenerationTask(item.ID)
+	if err != nil || !found || stored.Status != model.ImageTaskRunning || stored.ProviderTaskID != item.ProviderTaskID || stored.ClaimID != "" || stored.LeaseUntil == nil || stored.FinishedAt != "" {
+		t.Fatalf("task after transient poll failure = %#v, found=%t, err=%v", stored, found, err)
+	}
+	if provider.createCalls != 0 || provider.pollCalls != 1 {
+		t.Fatalf("provider calls after first poll: create=%d poll=%d", provider.createCalls, provider.pollCalls)
+	}
+	next, claimed, err := repository.ClaimNextImageGenerationTask(stored.LeaseUntil.Add(time.Millisecond), imageTaskLeaseDuration)
+	if err != nil || !claimed || next.ID != item.ID {
+		t.Fatalf("replacement claim = %#v, claimed=%t, err=%v", next, claimed, err)
+	}
+	executeImageTask(context.Background(), next)
+	if provider.createCalls != 0 || provider.pollCalls != 2 {
+		t.Fatalf("provider calls after retry: create=%d poll=%d", provider.createCalls, provider.pollCalls)
+	}
+}
+
+func TestExpiredImageTaskWorkerCleansPreparedResultWithoutPublishingMedia(t *testing.T) {
+	owner := newID("expired-result-owner")
+	past := time.Now().UTC().Add(-time.Minute)
+	item := model.ImageGenerationTask{
+		ID: newID("expired-result-task"), OwnerUID: owner, ClientRequestID: newID("expired-result-request"),
+		Status: model.ImageTaskRunning, ProviderTaskID: "expired-upstream", ClaimID: "expired-result-claim", LeaseUntil: &past,
+		CreatedAt: now(), UpdatedAt: now(),
+	}
+	if _, inserted, err := repository.CreateImageGenerationTask(item); err != nil || !inserted {
+		t.Fatalf("CreateImageGenerationTask() = inserted %t, err %v", inserted, err)
+	}
+	t.Cleanup(func() { _ = repository.DeleteImageGenerationTask(item.ID) })
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	completeImageTaskResults(canceled, item, nil, []ai.ImageResult{{Data: tinyPNG, ContentType: "image/png"}})
+
+	database, err := repository.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mediaCount int64
+	if err := database.Model(&model.Media{}).Where("owner_uid = ?", owner).Count(&mediaCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if mediaCount != 0 {
+		t.Fatalf("expired worker published %d media rows", mediaCount)
+	}
+	stored, found, err := repository.GetImageGenerationTask(item.ID)
+	if err != nil || !found || stored.Status != model.ImageTaskRunning || stored.ClaimID != item.ClaimID {
+		t.Fatalf("expired task mutated = %#v, found=%t, err=%v", stored, found, err)
+	}
+	files := 0
+	root := filepath.Join(config.Cfg.MediaLocalDir, "images", "private", "generated", owner)
+	if err := filepath.WalkDir(root, func(_ string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			files++
+		}
+		return nil
+	}); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if files != 0 {
+		t.Fatalf("expired worker left %d unpublished result objects", files)
 	}
 }
