@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/basketikun/infinite-canvas/model"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 func repositoryWorkflow(id, owner string) model.Workflow {
@@ -69,5 +71,50 @@ func TestWorkflowGraphMediaIDsAreTrimmedAndDeduplicated(t *testing.T) {
 	}})
 	if len(ids) != 2 || ids[0] != "media-a" || ids[1] != "media-b" {
 		t.Fatalf("WorkflowGraphMediaIDs() = %#v", ids)
+	}
+}
+
+func TestWorkflowMigrationPreservesLegacyImageTasks(t *testing.T) {
+	cfg := newRepositoryTestConfig(t, "workflow_legacy_image_task")
+	useRepositoryTestDB(t, cfg)
+	legacy, err := gorm.Open(postgres.Open(cfg.DatabaseDSN), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := legacy.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	if err := legacy.Exec(`CREATE TABLE image_generation_tasks (
+ id TEXT PRIMARY KEY, owner_uid TEXT, client_request_id TEXT,
+ status TEXT, created_at TEXT, updated_at TEXT
+ )`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Exec(`INSERT INTO image_generation_tasks (id, owner_uid, client_request_id, status, created_at, updated_at)
+ VALUES ('legacy-image-task', 'legacy-owner', 'legacy-request', 'running', '2026-09-08T01:00:00Z', '2026-09-08T01:00:01Z')`).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []string{"claim_id", "lease_until"} {
+		if legacy.Migrator().HasColumn("image_generation_tasks", column) {
+			t.Fatalf("legacy fixture already has %s", column)
+		}
+	}
+	database, err := DB()
+	if err != nil {
+		t.Fatalf("migrate legacy image task: %v", err)
+	}
+	for _, column := range []string{"claim_id", "lease_until"} {
+		if !database.Migrator().HasColumn(&model.ImageGenerationTask{}, column) {
+			t.Errorf("migration omitted %s", column)
+		}
+	}
+	var item model.ImageGenerationTask
+	if err := database.First(&item, "id = ?", "legacy-image-task").Error; err != nil {
+		t.Fatal(err)
+	}
+	if item.OwnerUID != "legacy-owner" || item.ClientRequestID != "legacy-request" || item.Status != model.ImageTaskRunning || item.ClaimID != "" || item.LeaseUntil != nil {
+		t.Fatalf("legacy image task changed during migration: %#v", item)
 	}
 }

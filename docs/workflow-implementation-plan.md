@@ -2,7 +2,7 @@
 
 - 项目：infinite-canvas
 - 日期：2026-09-09
-- 文档状态：待实施；已纳入 2026-09-09 确认的 HTML 预览交互调整
+- 文档状态：已完成本地实施与验收，尚未部署；已纳入 2026-09-09 确认的 HTML 预览交互调整
 - 用途：作为 Workflow 模块的开发、阶段验收和上线准备依据。
 
 ## 1. 目标与范围
@@ -263,7 +263,7 @@ P3 从第一版就包含数据库 claim、lease、失效 Worker 写入保护，�
 | `POST /api/v1/workflows/:id/copy` | 复制流程 |
 | `DELETE /api/v1/workflows/:id` | 删除定义，保留历史运行 |
 | `POST /api/v1/workflows/:id/runs` | 校验并创建运行快照 |
-| `GET /api/v1/workflow-runs` | 运行列表 |
+| `GET /api/v1/workflow-runs` | 运行列表；可选 `workflowId` 在当前用户范围内过滤，供编辑器恢复最新运行 |
 | `GET /api/v1/workflow-runs/:id` | 运行详情及步骤、槽位状态 |
 | `POST /api/v1/workflow-runs/:id/stop` | 停止后续执行 |
 | `POST /api/v1/workflow-runs/:id/retry` | 重试指定失败槽位 |

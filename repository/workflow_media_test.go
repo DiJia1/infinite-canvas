@@ -60,6 +60,47 @@ func TestWorkflowMediaReferencesProtectAndRelease(t *testing.T) {
 	}
 }
 
+func TestDeletingAWorkflowPreservesItsRunUntilTheRunReleasesMedia(t *testing.T) {
+	useRepositoryTestDB(t, newRepositoryTestConfig(t, "workflow_delete_lifecycle"))
+	current := time.Now().UTC().Truncate(time.Microsecond)
+	media, err := SaveMedia(model.Media{ID: "workflow-delete-media", OwnerUID: "workflow-delete-owner", ObjectKey: "workflow/delete-media", ContentType: "image/png"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	graph := model.WorkflowGraph{Version: 1, Nodes: []model.WorkflowNode{{ID: "input", Type: model.WorkflowNodeImageInput, MediaID: media.ID}}, Connections: []model.WorkflowConnection{}}
+	definition := model.Workflow{ID: "workflow-delete-definition", OwnerUID: media.OwnerUID, Name: "删除保留运行", Graph: graph, Revision: 1, CreatedAt: current.Format(time.RFC3339Nano), UpdatedAt: current.Format(time.RFC3339Nano)}
+	if _, err := CreateWorkflow(definition); err != nil {
+		t.Fatal(err)
+	}
+	run := model.WorkflowRun{ID: "workflow-delete-run", OwnerUID: media.OwnerUID, RequestID: "workflow-delete-request", WorkflowID: definition.ID, Revision: definition.Revision, Snapshot: `{"version":1}`, Status: "completed", StateVersion: 1, CreatedAt: current, UpdatedAt: current, FinishedAt: &current}
+	if _, inserted, err := CreateWorkflowRun(run, nil, nil, []string{media.ID}); err != nil || !inserted {
+		t.Fatalf("create run = inserted %t, err %v", inserted, err)
+	}
+	if deleted, err := DeleteWorkflow(media.OwnerUID, definition.ID, definition.Revision); err != nil || !deleted {
+		t.Fatalf("delete definition = %t, %v", deleted, err)
+	}
+	if _, found, err := GetWorkflow(media.OwnerUID, definition.ID); err != nil || found {
+		t.Fatalf("deleted definition found=%t err=%v", found, err)
+	}
+	if _, found, err := GetWorkflowRun(media.OwnerUID, run.ID); err != nil || !found {
+		t.Fatalf("historical run found=%t err=%v", found, err)
+	}
+	retained, _, err := GetMedia(media.ID)
+	if err != nil || retained.ExpiresAt != nil {
+		t.Fatalf("run did not retain media: expires=%v err=%v", retained.ExpiresAt, err)
+	}
+	if err := DeleteWorkflowRun(media.OwnerUID, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := GetWorkflowRun(media.OwnerUID, run.ID); err != nil || found {
+		t.Fatalf("deleted run found=%t err=%v", found, err)
+	}
+	released, _, err := GetMedia(media.ID)
+	if err != nil || released.ExpiresAt == nil || !released.ExpiresAt.After(current) {
+		t.Fatalf("terminal run release = expires %v err=%v", released.ExpiresAt, err)
+	}
+}
+
 func TestWorkflowMediaReferencesValidateAtomically(t *testing.T) {
 	useRepositoryTestDB(t, newRepositoryTestConfig(t, "workflow_media_validation"))
 	db, err := DB()

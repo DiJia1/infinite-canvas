@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -518,6 +519,65 @@ func TestRetryWorkflowOutputKeepsSuccessfulSiblingsAndReevaluatesDependents(t *t
 	}
 	if bySlot["failed-slot"].Attempt != 2 || bySlot["failed-slot"].Status != "ready" || bySlot["success-slot"].MediaID != "successful-sibling" || bySlot["success-slot"].Status != "succeeded" || bySlot["video-slot"].Status != "waiting" {
 		t.Fatalf("retry propagation = %#v", record)
+	}
+}
+
+func TestWorkflowSchedulerProcessesNineInputsAndNineOutputSlots(t *testing.T) {
+	clearWorkflowRuntimeTables(t)
+	previousConfig := config.Cfg
+	config.Cfg.WorkflowEnabled = true
+	config.Cfg.WorkflowGlobalConcurrency = 9
+	config.Cfg.WorkflowRunConcurrency = 9
+	t.Cleanup(func() { config.Cfg = previousConfig })
+	owner := "nine-slot-owner"
+	seedWorkflowMember(t, owner, true)
+
+	graph := model.WorkflowGraph{Version: 1, Nodes: []model.WorkflowNode{}, Connections: []model.WorkflowConnection{}}
+	ports := make([]model.WorkflowInputPort, 0, 9)
+	outputs := make([]model.WorkflowOutputSlot, 0, 9)
+	wantPrompt := ""
+	for index := 0; index < 9; index++ {
+		nodeID := fmt.Sprintf("prompt-%d", index)
+		portID := fmt.Sprintf("input-%d", index)
+		slotID := fmt.Sprintf("slot-%d", index)
+		text := fmt.Sprintf("提示-%d", index)
+		graph.Nodes = append(graph.Nodes, model.WorkflowNode{ID: nodeID, Type: model.WorkflowNodeTextInput, Text: text})
+		ports = append(ports, model.WorkflowInputPort{ID: portID, Type: model.WorkflowPortText})
+		outputs = append(outputs, model.WorkflowOutputSlot{ID: slotID, Type: model.WorkflowPortImage})
+		graph.Connections = append(graph.Connections, model.WorkflowConnection{SourceNodeID: nodeID, SourceSlotID: "output", TargetNodeID: "generate", TargetPortID: portID, Order: index})
+		if wantPrompt != "" {
+			wantPrompt += "\n\n"
+		}
+		wantPrompt += text
+	}
+	graph.Nodes = append(graph.Nodes, model.WorkflowNode{ID: "generate", Type: model.WorkflowNodeImageGeneration, InputPorts: ports, Config: &model.WorkflowNodeConfig{ProviderID: "nine-slot-provider", Resolution: "1k"}, Outputs: outputs})
+	run := seedWorkflowRunGraph(t, "nine-slot-run", owner, graph)
+
+	previousCreate := workflowCreateImageTask
+	created := map[string]bool{}
+	workflowCreateImageTask = func(_ context.Context, request CreateImageTaskRequest) (ImageTaskView, error) {
+		if request.Request.Prompt != wantPrompt {
+			t.Fatalf("ordered nine-input prompt = %q", request.Request.Prompt)
+		}
+		created[request.ClientRequestID] = true
+		return ImageTaskView{ID: "task-" + request.ClientRequestID, ClientRequestID: request.ClientRequestID, Status: "succeeded", Images: []MediaAccess{{MediaID: "media-" + request.ClientRequestID}}}, nil
+	}
+	t.Cleanup(func() { workflowCreateImageTask = previousCreate })
+
+	if processed, err := RunWorkflowSchedulerOnce(context.Background()); err != nil || !processed {
+		t.Fatalf("nine-slot scheduler = processed %t err %v", processed, err)
+	}
+	record, found, err := repository.GetWorkflowRun(owner, run.ID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	if len(created) != 9 || len(record.Outputs) != 9 || len(record.Attempts) != 9 || record.Run.Status != "completed" {
+		t.Fatalf("nine-slot result = created %d outputs %d attempts %d status %s", len(created), len(record.Outputs), len(record.Attempts), record.Run.Status)
+	}
+	for _, output := range record.Outputs {
+		if output.Status != "succeeded" || output.MediaID == "" {
+			t.Fatalf("nine-slot output = %#v", output)
+		}
 	}
 }
 
