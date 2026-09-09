@@ -614,6 +614,57 @@ func TestImageGenerationCreatesPersistentTaskWithoutForwardingModel(t *testing.T
 	}
 }
 
+func TestPublicGenerationRoutesRejectReservedWorkflowRequestIDs(t *testing.T) {
+	const owner = "reserved-workflow-request-owner"
+
+	imageRequestID := "workflow-public-image-request"
+	imageRequest := httptest.NewRequest(http.MethodPost, "/api/v1/images/generations", strings.NewReader(`{"clientRequestId":" `+imageRequestID+` ","prompt":"should not run","n":1}`))
+	imageRequest.Header.Set("Content-Type", "application/json")
+	imageRequest.Header.Set("X-Portal-User-Uid", owner)
+	imageResponse := httptest.NewRecorder()
+	New().ServeHTTP(imageResponse, imageRequest)
+	if imageResponse.Code != http.StatusBadRequest || !strings.Contains(imageResponse.Body.String(), `"code":1`) {
+		t.Fatalf("reserved image generation request = %d/%s", imageResponse.Code, imageResponse.Body.String())
+	}
+	if task, found, err := repository.GetImageGenerationTaskByClientRequest(owner, imageRequestID); err != nil || found {
+		t.Fatalf("reserved image generation persisted task = %#v, found=%t, err=%v", task, found, err)
+	}
+
+	editRequestID := "workflow-public-image-edit-request"
+	editBody := &bytes.Buffer{}
+	editWriter := multipart.NewWriter(editBody)
+	if err := editWriter.WriteField("clientRequestId", " "+editRequestID+" "); err != nil {
+		t.Fatal(err)
+	}
+	if err := editWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	editRequest := httptest.NewRequest(http.MethodPost, "/api/v1/images/edits", editBody)
+	editRequest.Header.Set("Content-Type", editWriter.FormDataContentType())
+	editRequest.Header.Set("X-Portal-User-Uid", owner)
+	editResponse := httptest.NewRecorder()
+	New().ServeHTTP(editResponse, editRequest)
+	if editResponse.Code != http.StatusBadRequest || !strings.Contains(editResponse.Body.String(), `"code":1`) {
+		t.Fatalf("reserved image edit request = %d/%s", editResponse.Code, editResponse.Body.String())
+	}
+	if task, found, err := repository.GetImageGenerationTaskByClientRequest(owner, editRequestID); err != nil || found {
+		t.Fatalf("reserved image edit persisted task = %#v, found=%t, err=%v", task, found, err)
+	}
+
+	videoRequestID := "workflow-public-video-request"
+	videoRequest := httptest.NewRequest(http.MethodPost, "/api/v1/videos", strings.NewReader(`{"clientRequestId":" `+videoRequestID+` ","prompt":"should not run","seconds":4,"size":"16:9","resolution":"720p"}`))
+	videoRequest.Header.Set("Content-Type", "application/json")
+	videoRequest.Header.Set("X-Portal-User-Uid", owner)
+	videoResponse := httptest.NewRecorder()
+	New().ServeHTTP(videoResponse, videoRequest)
+	if videoResponse.Code != http.StatusBadRequest || !strings.Contains(videoResponse.Body.String(), `"code":1`) {
+		t.Fatalf("reserved video request = %d/%s", videoResponse.Code, videoResponse.Body.String())
+	}
+	if task, found, err := repository.GetVideoGenerationTaskByClient(owner, videoRequestID); err != nil || found {
+		t.Fatalf("reserved video generation persisted task = %#v, found=%t, err=%v", task, found, err)
+	}
+}
+
 func TestImageEditPersistsPNGMaskAndOutputSnapshot(t *testing.T) {
 	if _, err := service.SaveSettings(model.Settings{AI: model.AISettings{
 		Providers:       []model.AIProvider{{ID: "async-maizi-mask", Name: "Maizi", Type: "maizi-image", Enabled: true, AspectRatios: []string{"1:1", "16:9"}, ImagePrices: []model.ImageResolutionPrice{{Resolution: "2K", Amount: decimal.Zero}}, Config: json.RawMessage(`{"apiKey":"test-key","model":"gpt-image-2"}`)}},

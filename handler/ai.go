@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"strings"
 
 	"github.com/basketikun/infinite-canvas/ai"
 	"github.com/basketikun/infinite-canvas/service"
@@ -15,6 +16,7 @@ const maxMultipartImageBytes int64 = 50 << 20
 const multipartRequestOverheadBytes int64 = 1 << 20
 const maxImageEditRequestBytes int64 = maxMultipartImageBytes*2 + multipartRequestOverheadBytes
 const maxVideoRequestBytes int64 = maxMultipartImageBytes + multipartRequestOverheadBytes
+const workflowRequestIDPrefix = "workflow-"
 
 type imageRequest struct {
 	ClientRequestID string          `json:"clientRequestId"`
@@ -33,6 +35,9 @@ func AIImagesGenerations(w http.ResponseWriter, r *http.Request) {
 	var payload imageRequest
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		Fail(w, "图片生成请求无效")
+		return
+	}
+	if rejectReservedWorkflowRequestID(w, payload.ClientRequestID) {
 		return
 	}
 	options, err := imageRequestOptionsFromJSON(payload.ProviderOptions)
@@ -57,6 +62,9 @@ func AIImagesEdits(w http.ResponseWriter, r *http.Request) {
 	limitMultipartRequestBody(w, r, maxImageEditRequestBytes)
 	if err := r.ParseMultipartForm(50 << 20); err != nil {
 		Fail(w, "图像编辑请求无效")
+		return
+	}
+	if rejectReservedWorkflowRequestID(w, r.FormValue("clientRequestId")) {
 		return
 	}
 	references, err := readMultipartImageReferences(r.MultipartForm.File["image"], maxMultipartImageBytes)
@@ -150,6 +158,9 @@ func AIVideos(w http.ResponseWriter, r *http.Request) {
 		Fail(w, "视频请求无效")
 		return
 	}
+	if rejectReservedWorkflowRequestID(w, request.ClientRequestID) {
+		return
+	}
 	task, err := service.CreateVideoGenerationTask(r.Context(), request)
 	if err != nil {
 		FailError(w, err)
@@ -157,6 +168,15 @@ func AIVideos(w http.ResponseWriter, r *http.Request) {
 	}
 	OK(w, task)
 }
+
+func rejectReservedWorkflowRequestID(w http.ResponseWriter, requestID string) bool {
+	if !strings.HasPrefix(strings.TrimSpace(requestID), workflowRequestIDPrefix) {
+		return false
+	}
+	FailStatus(w, http.StatusBadRequest, "请求 ID 无效")
+	return true
+}
+
 func AIVideoResume(w http.ResponseWriter, r *http.Request, id string) {
 	task, err := service.ResumeVideoGenerationTask(r.Context(), id)
 	if err != nil {
