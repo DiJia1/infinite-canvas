@@ -17,8 +17,9 @@ type CreateWorkflowRunInput struct {
 }
 
 type RetryWorkflowOutputInput struct {
-	NodeID string `json:"nodeId"`
-	SlotID string `json:"slotId"`
+	RequestID string `json:"requestId"`
+	NodeID    string `json:"nodeId"`
+	SlotID    string `json:"slotId"`
 }
 
 type WorkflowRunDetail struct {
@@ -37,6 +38,10 @@ type WorkflowRunList struct {
 }
 
 func CreateWorkflowRun(ctx context.Context, user PortalUser, workflowID string, input CreateWorkflowRunInput) (WorkflowRunDetail, error) {
+	workflowID, err := normalizeWorkflowPathID(workflowID)
+	if err != nil {
+		return WorkflowRunDetail{}, err
+	}
 	requestID := strings.TrimSpace(input.RequestID)
 	if strings.TrimSpace(user.UID) == "" || requestID == "" || len(requestID) > 128 {
 		return WorkflowRunDetail{}, workflowValidationError{message: "运行请求 ID 无效"}
@@ -44,6 +49,9 @@ func CreateWorkflowRun(ctx context.Context, user PortalUser, workflowID string, 
 	if existing, found, err := repository.GetWorkflowRunByRequest(user.UID, requestID); err != nil {
 		return WorkflowRunDetail{}, err
 	} else if found {
+		if existing.WorkflowID != workflowID {
+			return WorkflowRunDetail{}, workflowValidationError{message: "运行请求 ID 已用于其他流程"}
+		}
 		return GetWorkflowRun(ctx, user, existing.ID)
 	}
 	if !workflowsEnabled() {
@@ -60,7 +68,7 @@ func CreateWorkflowRun(ctx context.Context, user PortalUser, workflowID string, 
 	if err != nil {
 		return WorkflowRunDetail{}, err
 	}
-	if err := validateWorkflowRunInputs(user.UID, graph); err != nil {
+	if err := validateWorkflowRunInputs(ctx, user, graph); err != nil {
 		return WorkflowRunDetail{}, err
 	}
 	snapshot, err := json.Marshal(graph)
@@ -87,6 +95,9 @@ func CreateWorkflowRun(ctx context.Context, user PortalUser, workflowID string, 
 	created, _, err := repository.CreateWorkflowRun(run, steps, outputs, workflowGraphMediaIDs(graph))
 	if err != nil {
 		return WorkflowRunDetail{}, workflowRepositoryError(err)
+	}
+	if created.WorkflowID != workflowID {
+		return WorkflowRunDetail{}, workflowValidationError{message: "运行请求 ID 已用于其他流程"}
 	}
 	return GetWorkflowRun(ctx, user, created.ID)
 }
@@ -151,11 +162,11 @@ func RetryWorkflowOutput(_ context.Context, user PortalUser, id string, input Re
 	if err != nil {
 		return WorkflowRunDetail{}, err
 	}
-	nodeID, slotID := strings.TrimSpace(input.NodeID), strings.TrimSpace(input.SlotID)
-	if nodeID == "" || slotID == "" || len(nodeID) > 128 || len(slotID) > 128 {
+	requestID, nodeID, slotID := strings.TrimSpace(input.RequestID), strings.TrimSpace(input.NodeID), strings.TrimSpace(input.SlotID)
+	if requestID == "" || nodeID == "" || slotID == "" || len(requestID) > 128 || len(nodeID) > 128 || len(slotID) > 128 {
 		return WorkflowRunDetail{}, workflowValidationError{message: "重试槽位无效"}
 	}
-	if _, err := repository.RetryWorkflowOutput(user.UID, id, nodeID, slotID, time.Now().UTC()); err != nil {
+	if _, err := repository.RetryWorkflowOutput(user.UID, id, nodeID, slotID, requestID, time.Now().UTC()); err != nil {
 		switch {
 		case errors.Is(err, repository.ErrWorkflowRunNotFound):
 			return WorkflowRunDetail{}, safeMessageError{message: "运行记录不存在"}
@@ -184,7 +195,7 @@ func DeleteWorkflowRun(_ context.Context, user PortalUser, id string) error {
 	}
 }
 
-func validateWorkflowRunInputs(ownerUID string, graph model.WorkflowGraph) error {
+func validateWorkflowRunInputs(ctx context.Context, user PortalUser, graph model.WorkflowGraph) error {
 	mediaIDs := workflowGraphMediaIDs(graph)
 	if len(mediaIDs) > 0 {
 		// Ownership and cleanup state are checked atomically when run refs are created.
@@ -207,7 +218,7 @@ func validateWorkflowRunInputs(ownerUID string, graph model.WorkflowGraph) error
 		if !found || media.CleanupStatus != model.MediaCleanupActive {
 			return workflowValidationError{message: "流程输入素材不存在或正在删除"}
 		}
-		if media.OwnerUID != ownerUID {
+		if media.OwnerUID != user.UID {
 			_, public, err := repository.GetPublicImageByMediaID(node.MediaID)
 			if err != nil {
 				return err
@@ -277,8 +288,43 @@ func validateWorkflowRunInputs(ownerUID string, graph model.WorkflowGraph) error
 				return workflowRunValidationError(err, "图片生成节点价格未配置")
 			}
 		case model.WorkflowNodeVideoGeneration:
+			store, err := newImageStore()
+			if err != nil {
+				return err
+			}
+			if _, ok := store.(*ossImageStore); !ok {
+				return workflowValidationError{message: "视频生成需要 OSS 存储"}
+			}
 			if !providerAvailable(settings.AI, node.Config.ProviderID, ai.CapabilityVideoGenerate) {
 				return workflowValidationError{message: "视频模型不可用"}
+			}
+			request, err := workflowVideoRequest(node, resolved, "workflow-validation-request")
+			if err != nil {
+				return err
+			}
+			if err := validateVideoTaskRequest(request); err != nil {
+				return workflowRunValidationError(err, "视频生成节点参数无效")
+			}
+			provider, found := findProvider(settings.AI, node.Config.ProviderID)
+			if !found {
+				return workflowValidationError{message: "视频模型不可用"}
+			}
+			typeInfo, found := ai.Type(provider.Type)
+			if !found || typeInfo.New == nil {
+				return workflowValidationError{message: "视频模型不可用"}
+			}
+			instance, err := typeInfo.New(provider.Config)
+			if err != nil {
+				return workflowRunValidationError(err, "视频模型配置无效")
+			}
+			if _, ok := instance.(ai.VideoGenerator); !ok {
+				return workflowValidationError{message: "视频模型不可用"}
+			}
+			if _, err := videoTaskAmount(provider, request); err != nil {
+				return workflowRunValidationError(err, "视频生成节点价格未配置")
+			}
+			if err := validateWorkflowVideoReferenceDuration(ctx, graph, node.ID); err != nil {
+				return err
 			}
 		}
 	}
@@ -293,6 +339,40 @@ func workflowRunValidationError(err error, fallback string) error {
 		return workflowValidationError{message: safe.SafeMessage()}
 	}
 	return workflowValidationError{message: fallback}
+}
+
+func validateWorkflowVideoReferenceDuration(_ context.Context, graph model.WorkflowGraph, targetNodeID string) error {
+	nodes := map[string]model.WorkflowNode{}
+	for _, node := range graph.Nodes {
+		nodes[node.ID] = node
+	}
+	total := 0.0
+	for _, connection := range graph.Connections {
+		if connection.TargetNodeID != targetNodeID {
+			continue
+		}
+		source := nodes[connection.SourceNodeID]
+		switch source.Type {
+		case model.WorkflowNodeVideoInput:
+			media, found, err := repository.GetMedia(source.MediaID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return workflowValidationError{message: "视频输入素材不存在"}
+			}
+			total += media.Duration
+		case model.WorkflowNodeVideoGeneration:
+			if source.Config == nil || source.Config.Seconds == nil {
+				return workflowValidationError{message: "上游视频节点参数无效"}
+			}
+			total += float64(*source.Config.Seconds)
+		}
+	}
+	if total > 15.000001 {
+		return workflowValidationError{message: "视频参考总时长不能超过 15 秒"}
+	}
+	return nil
 }
 
 func workflowGraphMediaIDs(graph model.WorkflowGraph) []string {

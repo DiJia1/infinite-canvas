@@ -35,7 +35,8 @@ func TestVideoStatisticsFinishedRangeAndOperationStatusFilters(t *testing.T) {
 	}
 	claimed := task
 	claimed.ClaimID = "lease"
-	if err := db.Model(&model.VideoGenerationTask{}).Where("id = ?", task.ID).Updates(map[string]any{"claim_id": "lease", "status": "running"}).Error; err != nil {
+	leaseUntil := time.Now().UTC().Add(time.Minute)
+	if err := db.Model(&model.VideoGenerationTask{}).Where("id = ?", task.ID).Updates(map[string]any{"claim_id": "lease", "lease_until": leaseUntil, "status": "running"}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := UpdateClaimedVideoTask(claimed, map[string]any{"provider_task_id": "new-upstream"}); err != nil {

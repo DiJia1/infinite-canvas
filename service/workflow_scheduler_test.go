@@ -94,7 +94,7 @@ func TestWorkflowSchedulerRecoversAnExistingTaskAfterOwnerIsDisabled(t *testing.
 	if err != nil || !found {
 		t.Fatalf("claim = %#v, %v, %v", attempt, found, err)
 	}
-	authorized, err := repository.AuthorizeWorkflowAttemptSubmission(attempt, time.Now().UTC())
+	authorized, err := repository.AuthorizeWorkflowAttemptSubmission(attempt, true, time.Now().UTC())
 	if err != nil || !authorized {
 		t.Fatalf("authorize = %v, %v", authorized, err)
 	}
@@ -208,7 +208,7 @@ func TestWorkflowSchedulerPollsDueTasksWithoutStarvingReadyCapacity(t *testing.T
 		if err != nil || !found {
 			t.Fatalf("seed claim = %#v, %v, %v", attempt, found, err)
 		}
-		if authorized, err := repository.AuthorizeWorkflowAttemptSubmission(attempt, time.Now().UTC()); err != nil || !authorized {
+		if authorized, err := repository.AuthorizeWorkflowAttemptSubmission(attempt, true, time.Now().UTC()); err != nil || !authorized {
 			t.Fatalf("seed authorize = %v, %v", authorized, err)
 		}
 		attempt.Status, attempt.TaskType, attempt.TaskID = "running", "image", "task-"+runID
@@ -274,6 +274,33 @@ func TestWorkflowStopBeforeSubmissionAuthorizationCreatesNoTask(t *testing.T) {
 	}
 }
 
+func TestWorkflowStopSettlesAClaimWhenSubmissionSwitchIsOff(t *testing.T) {
+	clearWorkflowRuntimeTables(t)
+	previousConfig := config.Cfg
+	config.Cfg.WorkflowEnabled = true
+	t.Cleanup(func() { config.Cfg = previousConfig })
+	seedWorkflowMember(t, "switch-stop-owner", true)
+	run := seedWorkflowImageRun(t, "switch-stop-run", "switch-stop-owner")
+	if err := reevaluateWorkflowRun(run.OwnerUID, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	attempt, found, err := repository.ClaimWorkflowAttempt(4, 2, true, time.Now().UTC(), time.Minute)
+	if err != nil || !found {
+		t.Fatalf("claim = %#v, %v, %v", attempt, found, err)
+	}
+	config.Cfg.WorkflowEnabled = false
+	if changed, err := repository.RequestWorkflowRunStop(run.OwnerUID, run.ID, time.Now().UTC()); err != nil || !changed {
+		t.Fatalf("stop = %v, %v", changed, err)
+	}
+	if err := processWorkflowAttempt(context.Background(), attempt); err != nil {
+		t.Fatal(err)
+	}
+	record, _, _ := repository.GetWorkflowRun(run.OwnerUID, run.ID)
+	if record.Outputs[0].Status != "stopped" || record.Attempts[0].Status != "stopped" {
+		t.Fatalf("disabled switch left claimed work active: %#v", record)
+	}
+}
+
 func TestWorkflowEvaluationDoesNotWaitForAnUnconnectedSiblingSlot(t *testing.T) {
 	graph := model.WorkflowGraph{Version: 1, Nodes: []model.WorkflowNode{
 		{ID: "source", Type: model.WorkflowNodeImageGeneration, Outputs: []model.WorkflowOutputSlot{{ID: "used", Type: model.WorkflowPortImage}, {ID: "unrelated", Type: model.WorkflowPortImage}}},
@@ -305,6 +332,195 @@ func TestWorkflowRunAggregationKeepsUncertainWorkVisibleAndStopsAfterActiveWork(
 	}
 }
 
+func TestWorkflowSchedulerAdvancesAnImageToVideoDAGAndPublishesTheSlotResults(t *testing.T) {
+	clearWorkflowRuntimeTables(t)
+	previousConfig := config.Cfg
+	config.Cfg.WorkflowEnabled = true
+	config.Cfg.WorkflowGlobalConcurrency = 4
+	config.Cfg.WorkflowRunConcurrency = 2
+	t.Cleanup(func() { config.Cfg = previousConfig })
+	seedWorkflowMember(t, "mixed-owner", true)
+	run := seedWorkflowMixedRun(t, "mixed-run", "mixed-owner")
+	previousImage, previousVideo, previousVideoGet := workflowCreateImageTask, workflowCreateVideoTask, workflowGetVideoTask
+	imageCalls, videoCalls, videoGetCalls := 0, 0, 0
+	workflowCreateImageTask = func(_ context.Context, request CreateImageTaskRequest) (ImageTaskView, error) {
+		imageCalls++
+		return ImageTaskView{ID: "mixed-image-task", ClientRequestID: request.ClientRequestID, Status: "succeeded", Images: []MediaAccess{{MediaID: "mixed-image-media"}}}, nil
+	}
+	workflowCreateVideoTask = func(_ context.Context, request CreateVideoTaskRequest) (VideoTaskView, error) {
+		videoCalls++
+		if len(request.ImageMediaIDs) != 1 || request.ImageMediaIDs[0] != "mixed-image-media" || request.Prompt != "制作视频" || request.Seconds != 6 {
+			t.Fatalf("video request did not use upstream output: %#v", request)
+		}
+		return VideoTaskView{ID: "mixed-video-task", ClientRequestID: request.ClientRequestID, Status: "running"}, nil
+	}
+	workflowGetVideoTask = func(_ context.Context, requestID string) (VideoTaskView, error) {
+		videoGetCalls++
+		return VideoTaskView{ID: "mixed-video-task", ClientRequestID: requestID, Status: "succeeded", ResultMediaIDs: []string{"mixed-video-media"}}, nil
+	}
+	t.Cleanup(func() {
+		workflowCreateImageTask, workflowCreateVideoTask, workflowGetVideoTask = previousImage, previousVideo, previousVideoGet
+	})
+	if processed, err := RunWorkflowSchedulerOnce(context.Background()); err != nil || !processed {
+		t.Fatalf("mixed first pass = %v, %v", processed, err)
+	}
+	record, _, _ := repository.GetWorkflowRun(run.OwnerUID, run.ID)
+	if imageCalls != 1 || videoCalls != 1 || len(record.Outputs) != 2 || record.Outputs[0].Status == "waiting" && record.Outputs[1].Status == "waiting" {
+		t.Fatalf("mixed first result = %#v image=%d video=%d", record, imageCalls, videoCalls)
+	}
+	database, _ := repository.DB()
+	if err := database.Model(&model.WorkflowOutputAttempt{}).Where("run_id = ? AND task_type = ?", run.ID, "video").Update("next_poll_at", time.Now().UTC().Add(-time.Second)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := RunWorkflowSchedulerOnce(context.Background()); err != nil || !processed {
+		t.Fatalf("mixed completion pass = %v, %v", processed, err)
+	}
+	record, _, _ = repository.GetWorkflowRun(run.OwnerUID, run.ID)
+	byNode := map[string]model.WorkflowOutputExecution{}
+	for _, output := range record.Outputs {
+		byNode[output.NodeID] = output
+	}
+	if videoGetCalls != 1 || byNode["image"].MediaID != "mixed-image-media" || byNode["video"].MediaID != "mixed-video-media" || record.Run.Status != "completed" {
+		t.Fatalf("mixed completed result = %#v videoGet=%d", record, videoGetCalls)
+	}
+}
+
+func TestWorkflowVideoUncertainStateOnlyQueriesTheOriginalTask(t *testing.T) {
+	clearWorkflowRuntimeTables(t)
+	previousConfig := config.Cfg
+	config.Cfg.WorkflowEnabled = true
+	t.Cleanup(func() { config.Cfg = previousConfig })
+	seedWorkflowMember(t, "video-uncertain-owner", true)
+	run := seedWorkflowVideoRun(t, "video-uncertain-run", "video-uncertain-owner")
+	previousCreate, previousGet := workflowCreateVideoTask, workflowGetVideoTask
+	createCalls, getCalls := 0, 0
+	workflowCreateVideoTask = func(_ context.Context, request CreateVideoTaskRequest) (VideoTaskView, error) {
+		createCalls++
+		return VideoTaskView{ID: "uncertain-video-task", ClientRequestID: request.ClientRequestID, Status: "uncertain", Error: "提交待确认"}, nil
+	}
+	workflowGetVideoTask = func(_ context.Context, requestID string) (VideoTaskView, error) {
+		getCalls++
+		return VideoTaskView{ID: "uncertain-video-task", ClientRequestID: requestID, Status: "running"}, nil
+	}
+	t.Cleanup(func() { workflowCreateVideoTask, workflowGetVideoTask = previousCreate, previousGet })
+	if _, err := RunWorkflowSchedulerOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	database, _ := repository.DB()
+	var first model.WorkflowOutputAttempt
+	if err := database.Where("run_id = ?", run.ID).First(&first).Error; err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != "uncertain" {
+		t.Fatalf("first video attempt = %#v", first)
+	}
+	if err := database.Model(&first).Update("next_poll_at", time.Now().UTC().Add(-time.Second)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunWorkflowSchedulerOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record, _, _ := repository.GetWorkflowRun(run.OwnerUID, run.ID)
+	if createCalls != 1 || getCalls != 1 || len(record.Attempts) != 1 || record.Attempts[0].TaskID != "uncertain-video-task" || record.Outputs[0].Status != "running" {
+		t.Fatalf("uncertain recovery = %#v create=%d get=%d", record, createCalls, getCalls)
+	}
+}
+
+func TestWorkflowVideoRetryCreatesOneNewAttemptWithANewDeterministicRequest(t *testing.T) {
+	clearWorkflowRuntimeTables(t)
+	previousConfig := config.Cfg
+	config.Cfg.WorkflowEnabled = true
+	t.Cleanup(func() { config.Cfg = previousConfig })
+	seedWorkflowMember(t, "video-retry-owner", true)
+	run := seedWorkflowVideoRun(t, "video-retry-run", "video-retry-owner")
+	previousCreate := workflowCreateVideoTask
+	requestIDs := []string{}
+	workflowCreateVideoTask = func(_ context.Context, request CreateVideoTaskRequest) (VideoTaskView, error) {
+		requestIDs = append(requestIDs, request.ClientRequestID)
+		if len(requestIDs) == 1 {
+			return VideoTaskView{ID: "video-retry-first-task", ClientRequestID: request.ClientRequestID, Status: "failed", Error: "供应商明确失败"}, nil
+		}
+		return VideoTaskView{ID: "video-retry-second-task", ClientRequestID: request.ClientRequestID, Status: "succeeded", ResultMediaIDs: []string{"video-retry-media"}}, nil
+	}
+	t.Cleanup(func() { workflowCreateVideoTask = previousCreate })
+
+	if processed, err := RunWorkflowSchedulerOnce(context.Background()); err != nil || !processed {
+		t.Fatalf("first video attempt = %v, %v", processed, err)
+	}
+	record, _, _ := repository.GetWorkflowRun(run.OwnerUID, run.ID)
+	if len(requestIDs) != 1 || record.Outputs[0].Status != "failed" || len(record.Attempts) != 1 {
+		t.Fatalf("first video failure = %#v requests=%v", record, requestIDs)
+	}
+	input := RetryWorkflowOutputInput{RequestID: "retry-video-once", NodeID: "video", SlotID: "output"}
+	for click := 0; click < 2; click++ {
+		if _, err := RetryWorkflowOutput(context.Background(), PortalUser{UID: run.OwnerUID}, run.ID, input); err != nil {
+			t.Fatalf("retry click %d: %v", click+1, err)
+		}
+	}
+	if processed, err := RunWorkflowSchedulerOnce(context.Background()); err != nil || !processed {
+		t.Fatalf("retried video attempt = %v, %v", processed, err)
+	}
+	record, _, _ = repository.GetWorkflowRun(run.OwnerUID, run.ID)
+	retryRecorded := false
+	for _, attempt := range record.Attempts {
+		if attempt.Attempt == 2 && attempt.RetryRequestID == input.RequestID {
+			retryRecorded = true
+		}
+	}
+	if len(requestIDs) != 2 || requestIDs[0] == requestIDs[1] || len(record.Attempts) != 2 || !retryRecorded || record.Outputs[0].Attempt != 2 || record.Outputs[0].MediaID != "video-retry-media" || record.Run.Status != "completed" {
+		t.Fatalf("retried video completion = %#v requests=%v", record, requestIDs)
+	}
+}
+
+func TestRetryWorkflowOutputKeepsSuccessfulSiblingsAndReevaluatesDependents(t *testing.T) {
+	clearWorkflowRuntimeTables(t)
+	previousConfig := config.Cfg
+	config.Cfg.WorkflowEnabled = true
+	t.Cleanup(func() { config.Cfg = previousConfig })
+	seedWorkflowMember(t, "retry-service-owner", true)
+	seconds := 6
+	graph := model.WorkflowGraph{Version: 1, Nodes: []model.WorkflowNode{
+		{ID: "prompt", Type: model.WorkflowNodeTextInput, Text: "重试"},
+		{ID: "source", Type: model.WorkflowNodeImageGeneration, Config: &model.WorkflowNodeConfig{ProviderID: "image"}, Outputs: []model.WorkflowOutputSlot{{ID: "failed-slot", Type: model.WorkflowPortImage}, {ID: "success-slot", Type: model.WorkflowPortImage}}},
+		{ID: "downstream", Type: model.WorkflowNodeVideoGeneration, Config: &model.WorkflowNodeConfig{ProviderID: "video", Seconds: &seconds}, Outputs: []model.WorkflowOutputSlot{{ID: "video-slot", Type: model.WorkflowPortVideo}}},
+	}, Connections: []model.WorkflowConnection{
+		{SourceNodeID: "prompt", SourceSlotID: "output", TargetNodeID: "source", TargetPortID: "prompt", Order: 0},
+		{SourceNodeID: "source", SourceSlotID: "failed-slot", TargetNodeID: "downstream", TargetPortID: "image", Order: 0},
+		{SourceNodeID: "prompt", SourceSlotID: "output", TargetNodeID: "downstream", TargetPortID: "prompt", Order: 1},
+	}}
+	snapshot, _ := json.Marshal(graph)
+	current := time.Now().UTC()
+	run := model.WorkflowRun{ID: "retry-service-run", OwnerUID: "retry-service-owner", RequestID: "retry-service-start", Snapshot: string(snapshot), Status: "partially_completed", StateVersion: 1, CreatedAt: current, UpdatedAt: current}
+	steps := []model.WorkflowStepExecution{{RunID: run.ID, NodeID: "source", Status: "failed"}, {RunID: run.ID, NodeID: "downstream", Status: "blocked"}}
+	outputs := []model.WorkflowOutputExecution{
+		{RunID: run.ID, NodeID: "source", SlotID: "failed-slot", Status: "failed", Attempt: 1, Error: "失败", UpdatedAt: current},
+		{RunID: run.ID, NodeID: "source", SlotID: "success-slot", Status: "succeeded", Attempt: 1, MediaID: "successful-sibling", UpdatedAt: current},
+		{RunID: run.ID, NodeID: "downstream", SlotID: "video-slot", Status: "blocked", Attempt: 1, Error: "上游输出失败", UpdatedAt: current},
+	}
+	if _, _, err := repository.CreateWorkflowRun(run, steps, outputs, nil); err != nil {
+		t.Fatal(err)
+	}
+	user := PortalUser{UID: run.OwnerUID}
+	input := RetryWorkflowOutputInput{RequestID: "retry-click", NodeID: "source", SlotID: "failed-slot"}
+	if _, err := RetryWorkflowOutput(context.Background(), user, run.ID, input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RetryWorkflowOutput(context.Background(), user, run.ID, input); err != nil {
+		t.Fatal(err)
+	}
+	if err := reevaluateWorkflowRun(run.OwnerUID, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	record, _, _ := repository.GetWorkflowRun(run.OwnerUID, run.ID)
+	bySlot := map[string]model.WorkflowOutputExecution{}
+	for _, output := range record.Outputs {
+		bySlot[output.SlotID] = output
+	}
+	if bySlot["failed-slot"].Attempt != 2 || bySlot["failed-slot"].Status != "ready" || bySlot["success-slot"].MediaID != "successful-sibling" || bySlot["success-slot"].Status != "succeeded" || bySlot["video-slot"].Status != "waiting" {
+		t.Fatalf("retry propagation = %#v", record)
+	}
+}
+
 func seedWorkflowImageRun(t *testing.T, id, owner string) model.WorkflowRun {
 	t.Helper()
 	graph := model.WorkflowGraph{Version: 1, Nodes: []model.WorkflowNode{
@@ -316,6 +532,54 @@ func seedWorkflowImageRun(t *testing.T, id, owner string) model.WorkflowRun {
 	run := model.WorkflowRun{ID: id, OwnerUID: owner, RequestID: id + "-request", Snapshot: string(snapshot), Status: "pending", CreatedAt: current, UpdatedAt: current}
 	steps := []model.WorkflowStepExecution{{RunID: id, NodeID: "generate", Status: "waiting"}}
 	outputs := []model.WorkflowOutputExecution{{RunID: id, NodeID: "generate", SlotID: "output", Status: "waiting", Attempt: 1, UpdatedAt: current}}
+	if _, _, err := repository.CreateWorkflowRun(run, steps, outputs, nil); err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+func seedWorkflowVideoRun(t *testing.T, id, owner string) model.WorkflowRun {
+	t.Helper()
+	seconds := 6
+	graph := model.WorkflowGraph{Version: 1, Nodes: []model.WorkflowNode{
+		{ID: "prompt", Type: model.WorkflowNodeTextInput, Text: "制作视频"},
+		{ID: "video", Type: model.WorkflowNodeVideoGeneration, Config: &model.WorkflowNodeConfig{ProviderID: "frozen-video-provider", Size: "16:9", Resolution: "720p", Seconds: &seconds}, Outputs: []model.WorkflowOutputSlot{{ID: "output", Type: model.WorkflowPortVideo}}},
+	}, Connections: []model.WorkflowConnection{{SourceNodeID: "prompt", SourceSlotID: "output", TargetNodeID: "video", TargetPortID: "prompt", Order: 0}}}
+	return seedWorkflowRunGraph(t, id, owner, graph)
+}
+
+func seedWorkflowMixedRun(t *testing.T, id, owner string) model.WorkflowRun {
+	t.Helper()
+	seconds := 6
+	graph := model.WorkflowGraph{Version: 1, Nodes: []model.WorkflowNode{
+		{ID: "image-prompt", Type: model.WorkflowNodeTextInput, Text: "生成产品图"},
+		{ID: "video-prompt", Type: model.WorkflowNodeTextInput, Text: "制作视频"},
+		{ID: "image", Type: model.WorkflowNodeImageGeneration, Config: &model.WorkflowNodeConfig{ProviderID: "frozen-image-provider", Resolution: "1k"}, Outputs: []model.WorkflowOutputSlot{{ID: "image-output", Type: model.WorkflowPortImage}}},
+		{ID: "video", Type: model.WorkflowNodeVideoGeneration, Config: &model.WorkflowNodeConfig{ProviderID: "frozen-video-provider", Size: "16:9", Resolution: "720p", Seconds: &seconds}, Outputs: []model.WorkflowOutputSlot{{ID: "video-output", Type: model.WorkflowPortVideo}}},
+	}, Connections: []model.WorkflowConnection{
+		{SourceNodeID: "image-prompt", SourceSlotID: "output", TargetNodeID: "image", TargetPortID: "prompt", Order: 0},
+		{SourceNodeID: "image", SourceSlotID: "image-output", TargetNodeID: "video", TargetPortID: "image", Order: 0},
+		{SourceNodeID: "video-prompt", SourceSlotID: "output", TargetNodeID: "video", TargetPortID: "prompt", Order: 1},
+	}}
+	return seedWorkflowRunGraph(t, id, owner, graph)
+}
+
+func seedWorkflowRunGraph(t *testing.T, id, owner string, graph model.WorkflowGraph) model.WorkflowRun {
+	t.Helper()
+	snapshot, _ := json.Marshal(graph)
+	current := time.Now().UTC().Add(-time.Hour)
+	run := model.WorkflowRun{ID: id, OwnerUID: owner, RequestID: id + "-request", Snapshot: string(snapshot), Status: "pending", StateVersion: 1, CreatedAt: current, UpdatedAt: current}
+	steps := []model.WorkflowStepExecution{}
+	outputs := []model.WorkflowOutputExecution{}
+	for _, node := range graph.Nodes {
+		if node.Type != model.WorkflowNodeImageGeneration && node.Type != model.WorkflowNodeVideoGeneration {
+			continue
+		}
+		steps = append(steps, model.WorkflowStepExecution{RunID: id, NodeID: node.ID, Status: "waiting"})
+		for _, slot := range node.Outputs {
+			outputs = append(outputs, model.WorkflowOutputExecution{RunID: id, NodeID: node.ID, SlotID: slot.ID, Status: "waiting", Attempt: 1, UpdatedAt: current})
+		}
+	}
 	if _, _, err := repository.CreateWorkflowRun(run, steps, outputs, nil); err != nil {
 		t.Fatal(err)
 	}

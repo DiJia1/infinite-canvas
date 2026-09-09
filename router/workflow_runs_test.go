@@ -68,15 +68,37 @@ func TestWorkflowRunRoutesAreIdempotentOwnerScopedAndProtectActiveRuns(t *testin
 	if duplicate.Code != http.StatusOK || json.Unmarshal(workflowResponse(t, duplicate).Data, &repeated) != nil || repeated.Run.ID != created.Run.ID {
 		t.Fatalf("duplicate start = %d/%s decoded=%#v", duplicate.Code, duplicate.Body.String(), repeated)
 	}
+	secondWorkflowID := createRouteWorkflow(t, owner, "1k")
+	mismatched := workflowRequest(http.MethodPost, "/api/v1/workflows/"+secondWorkflowID+"/runs", owner, `{"requestId":"same-start-request"}`)
+	if mismatched.Code != http.StatusBadRequest || workflowResponse(t, mismatched).Code != 1 {
+		t.Fatalf("cross-workflow idempotency key = %d/%s", mismatched.Code, mismatched.Body.String())
+	}
 
 	for _, request := range []*httptest.ResponseRecorder{
 		workflowRequest(http.MethodGet, "/api/v1/workflow-runs/"+created.Run.ID, other, ""),
 		workflowRequest(http.MethodPost, "/api/v1/workflow-runs/"+created.Run.ID+"/stop", other, ""),
-		workflowRequest(http.MethodPost, "/api/v1/workflow-runs/"+created.Run.ID+"/retry", other, `{"nodeId":"generate","slotId":"slot"}`),
+		workflowRequest(http.MethodPost, "/api/v1/workflow-runs/"+created.Run.ID+"/retry", other, `{"requestId":"other-retry","nodeId":"generate","slotId":"slot"}`),
 		workflowRequest(http.MethodDelete, "/api/v1/workflow-runs/"+created.Run.ID, other, ""),
 	} {
 		if workflowResponse(t, request).Code != 1 {
 			t.Fatalf("cross-owner run request was accepted: %d/%s", request.Code, request.Body.String())
+		}
+	}
+	database, _ := repository.DB()
+	if err := database.Model(&model.WorkflowOutputExecution{}).Where("run_id = ?", created.Run.ID).Updates(map[string]any{"status": "failed", "error": "明确失败"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Model(&model.WorkflowRun{}).Where("id = ?", created.Run.ID).Update("status", "failed").Error; err != nil {
+		t.Fatal(err)
+	}
+	retryBody := `{"requestId":"retry-once","nodeId":"generate","slotId":"slot"}`
+	for attempt := 0; attempt < 2; attempt++ {
+		retry := workflowRequest(http.MethodPost, "/api/v1/workflow-runs/"+created.Run.ID+"/retry", owner, retryBody)
+		var detail struct {
+			Outputs []model.WorkflowOutputExecution `json:"outputs"`
+		}
+		if retry.Code != http.StatusOK || json.Unmarshal(workflowResponse(t, retry).Data, &detail) != nil || len(detail.Outputs) != 1 || detail.Outputs[0].Attempt != 2 {
+			t.Fatalf("retry attempt %d = %d/%s decoded=%#v", attempt+1, retry.Code, retry.Body.String(), detail)
 		}
 	}
 	activeDelete := workflowRequest(http.MethodDelete, "/api/v1/workflow-runs/"+created.Run.ID, owner, "")
@@ -91,7 +113,6 @@ func TestWorkflowRunRoutesAreIdempotentOwnerScopedAndProtectActiveRuns(t *testin
 	if list.Code != http.StatusOK || workflowResponse(t, list).Code != 0 {
 		t.Fatalf("list runs = %d/%s", list.Code, list.Body.String())
 	}
-	database, _ := repository.DB()
 	if err := database.Model(&model.WorkflowRun{}).Where("id = ?", created.Run.ID).Updates(map[string]any{"status": "stopped", "finished_at": time.Now().UTC()}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -126,6 +147,46 @@ func TestWorkflowRunRoutesRejectDisabledExecutionAndInvalidWholeGraphParameters(
 	memberResponse := workflowRequest(http.MethodPost, "/api/v1/workflows/"+disabledOwnerWorkflow+"/runs", disabledOwner, `{"requestId":"disabled-member"}`)
 	if memberResponse.Code != http.StatusBadRequest || workflowResponse(t, memberResponse).Code != 1 {
 		t.Fatalf("disabled member start = %d/%s", memberResponse.Code, memberResponse.Body.String())
+	}
+}
+
+func TestWorkflowRunConcurrentRequestIDCannotCrossWorkflows(t *testing.T) {
+	restore := configureWorkflowRouteRuntime(t)
+	defer restore()
+	owner := "workflow-concurrent-owner-" + time.Now().Format("150405.000000000")
+	seedRouteWorkflowMember(t, owner, true)
+	workflowIDs := []string{createRouteWorkflow(t, owner, "1k"), createRouteWorkflow(t, owner, "1k")}
+	start := make(chan struct{})
+	responses := make(chan *httptest.ResponseRecorder, len(workflowIDs))
+	var workers sync.WaitGroup
+	for _, workflowID := range workflowIDs {
+		workflowID := workflowID
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			responses <- workflowRequest(http.MethodPost, "/api/v1/workflows/"+workflowID+"/runs", owner, `{"requestId":"concurrent-cross-workflow"}`)
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(responses)
+
+	successes := 0
+	conflicts := 0
+	for response := range responses {
+		payload := workflowResponse(t, response)
+		switch {
+		case response.Code == http.StatusOK && payload.Code == 0:
+			successes++
+		case response.Code == http.StatusBadRequest && payload.Code == 1:
+			conflicts++
+		default:
+			t.Fatalf("unexpected concurrent start response = %d/%s", response.Code, response.Body.String())
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("concurrent starts: successes=%d conflicts=%d", successes, conflicts)
 	}
 }
 

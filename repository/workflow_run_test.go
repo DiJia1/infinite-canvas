@@ -11,7 +11,7 @@ import (
 
 func TestCreateWorkflowRunIsOwnerRequestIdempotent(t *testing.T) {
 	useRepositoryTestDB(t, newRepositoryTestConfig(t, "workflow_run_idempotent"))
-	current := time.Now().UTC()
+	current := time.Now().UTC().Truncate(time.Microsecond)
 	first := model.WorkflowRun{ID: "run-first", OwnerUID: "run-owner", RequestID: "start-request", Snapshot: `{"version":1,"nodes":[],"connections":[]}`, Status: "pending", CreatedAt: current, UpdatedAt: current}
 	created, inserted, err := CreateWorkflowRun(first, nil, []model.WorkflowOutputExecution{{RunID: first.ID, NodeID: "node", SlotID: "slot", Status: "waiting", Attempt: 1, UpdatedAt: current}}, nil)
 	if err != nil || !inserted || created.ID != first.ID {
@@ -32,7 +32,7 @@ func TestCreateWorkflowRunIsOwnerRequestIdempotent(t *testing.T) {
 
 func TestClaimWorkflowAttemptAtomicallyEnforcesGlobalAndRunCapacity(t *testing.T) {
 	useRepositoryTestDB(t, newRepositoryTestConfig(t, "workflow_run_capacity"))
-	current := time.Now().UTC()
+	current := time.Now().UTC().Truncate(time.Microsecond)
 	for runIndex := 1; runIndex <= 2; runIndex++ {
 		runID := fmt.Sprintf("capacity-run-%d", runIndex)
 		run := model.WorkflowRun{ID: runID, OwnerUID: "capacity-owner", RequestID: fmt.Sprintf("request-%d", runIndex), Snapshot: `{}`, Status: "running", CreatedAt: current, UpdatedAt: current}
@@ -47,6 +47,18 @@ func TestClaimWorkflowAttemptAtomicallyEnforcesGlobalAndRunCapacity(t *testing.T
 	first, found, err := ClaimWorkflowAttempt(2, 1, true, current, time.Minute)
 	if err != nil || !found {
 		t.Fatalf("first claim = %#v, %v, %v", first, found, err)
+	}
+	if first.QueuedAt == nil || first.StartedAt != nil || !first.QueuedAt.Equal(current) {
+		t.Fatalf("first claim timing = queued %v started %v", first.QueuedAt, first.StartedAt)
+	}
+	authorized, err := AuthorizeWorkflowAttemptSubmission(first, true, current.Add(time.Millisecond))
+	if err != nil || !authorized {
+		t.Fatalf("authorize first claim = %v, %v", authorized, err)
+	}
+	database, _ := DB()
+	var started model.WorkflowOutputAttempt
+	if err := database.First(&started, "id = ?", first.ID).Error; err != nil || started.StartedAt == nil || !started.StartedAt.Equal(current.Add(time.Millisecond)) {
+		t.Fatalf("authorized claim timing = %v, %v", started.StartedAt, err)
 	}
 	second, found, err := ClaimWorkflowAttempt(2, 1, true, current, time.Minute)
 	if err != nil || !found || second.RunID == first.RunID {
@@ -113,5 +125,41 @@ func TestWorkflowEvaluationRejectsAConcurrentStopSnapshot(t *testing.T) {
 	updated, _, _ := GetWorkflowRun(run.OwnerUID, run.ID)
 	if !updated.Run.StopRequested || updated.Run.Status != "stopping" || updated.Outputs[0].Status != "waiting" {
 		t.Fatalf("stale evaluation overwrote stop: %#v", updated)
+	}
+}
+
+func TestRetryWorkflowOutputIsIdempotentPerClientRequest(t *testing.T) {
+	useRepositoryTestDB(t, newRepositoryTestConfig(t, "workflow_retry_idempotent"))
+	current := time.Now().UTC()
+	run := model.WorkflowRun{ID: "retry-run", OwnerUID: "retry-owner", RequestID: "run-request", Snapshot: `{}`, Status: "failed", StateVersion: 1, CreatedAt: current, UpdatedAt: current}
+	output := model.WorkflowOutputExecution{RunID: run.ID, NodeID: "node", SlotID: "slot", Status: "failed", Attempt: 1, Error: "first failure", UpdatedAt: current}
+	if _, _, err := CreateWorkflowRun(run, nil, []model.WorkflowOutputExecution{output}, nil); err != nil {
+		t.Fatal(err)
+	}
+	first, err := RetryWorkflowOutput(run.OwnerUID, run.ID, output.NodeID, output.SlotID, "retry-request-one", current.Add(time.Second))
+	if err != nil || first.Attempt != 2 || first.Status != "waiting" {
+		t.Fatalf("first retry = %#v, %v", first, err)
+	}
+	database, _ := DB()
+	if err := database.Model(&model.WorkflowOutputExecution{}).Where("run_id = ? AND node_id = ? AND slot_id = ?", run.ID, output.NodeID, output.SlotID).Updates(map[string]any{"status": "failed", "error": "second failure"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&model.WorkflowOutputAttempt{ID: "retry-attempt-one", RunID: run.ID, NodeID: output.NodeID, SlotID: output.SlotID, Attempt: 2, OwnerUID: run.OwnerUID, RequestID: "retry-attempt-request-one", RetryRequestID: "retry-request-one", Status: "failed", CreatedAt: current, UpdatedAt: current}).Error; err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := RetryWorkflowOutput(run.OwnerUID, run.ID, output.NodeID, output.SlotID, "retry-request-one", current.Add(2*time.Second))
+	if err != nil || duplicate.Attempt != 2 || duplicate.Status != "failed" {
+		t.Fatalf("duplicate retry = %#v, %v", duplicate, err)
+	}
+	second, err := RetryWorkflowOutput(run.OwnerUID, run.ID, output.NodeID, output.SlotID, "retry-request-two", current.Add(3*time.Second))
+	if err != nil || second.Attempt != 3 || second.Status != "waiting" {
+		t.Fatalf("second logical retry = %#v, %v", second, err)
+	}
+	if err := database.Model(&model.WorkflowOutputExecution{}).Where("run_id = ? AND node_id = ? AND slot_id = ?", run.ID, output.NodeID, output.SlotID).Updates(map[string]any{"status": "failed", "error": "third failure"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	lateFirst, err := RetryWorkflowOutput(run.OwnerUID, run.ID, output.NodeID, output.SlotID, "retry-request-one", current.Add(4*time.Second))
+	if err != nil || lateFirst.Attempt != 3 || lateFirst.Status != "failed" {
+		t.Fatalf("late first retry replay = %#v, %v", lateFirst, err)
 	}
 }

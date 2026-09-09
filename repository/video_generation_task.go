@@ -107,7 +107,8 @@ func UpdateClaimedVideoTask(item model.VideoGenerationTask, updates map[string]a
 		return err
 	}
 	updates["updated_at"] = time.Now().UTC()
-	result := db.Model(&model.VideoGenerationTask{}).Where("id = ? AND claim_id = ?", item.ID, item.ClaimID).Updates(updates)
+	current := time.Now().UTC()
+	result := db.Model(&model.VideoGenerationTask{}).Where("id = ? AND claim_id = ? AND lease_until > ?", item.ID, item.ClaimID, current).Updates(updates)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -149,7 +150,8 @@ func CompleteVideoGenerationTask(item model.VideoGenerationTask, media []model.M
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&task, "id = ?", item.ID).Error; err != nil {
 			return err
 		}
-		if task.ClaimID != item.ClaimID || task.Status != "saving" {
+		current := time.Now().UTC()
+		if task.ClaimID != item.ClaimID || task.Status != "saving" || task.LeaseUntil == nil || !task.LeaseUntil.After(current) {
 			return ErrVideoLeaseLost
 		}
 		ids := make([]string, 0, len(media))
@@ -165,7 +167,6 @@ func CompleteVideoGenerationTask(item model.VideoGenerationTask, media []model.M
 			}
 			ids = append(ids, m.ID)
 		}
-		current := time.Now().UTC()
 		if err := tx.Model(&task).Updates(map[string]any{"status": "succeeded", "progress": 100, "result_media_ids_json": mustJSON(ids), "finished_at": current, "lease_until": nil, "error": ""}).Error; err != nil {
 			return err
 		}
@@ -179,7 +180,8 @@ func FinishFailedVideoTask(item model.VideoGenerationTask, message string, curre
 		return err
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&model.VideoGenerationTask{}).Where("id = ? AND claim_id = ?", item.ID, item.ClaimID).Updates(map[string]any{"status": "failed", "error": message, "finished_at": current, "lease_until": nil})
+		leaseCheckAt := time.Now().UTC()
+		result := tx.Model(&model.VideoGenerationTask{}).Where("id = ? AND claim_id = ? AND lease_until > ?", item.ID, item.ClaimID, leaseCheckAt).Updates(map[string]any{"status": "failed", "error": message, "finished_at": current, "lease_until": nil})
 		if result.Error != nil {
 			return result.Error
 		}

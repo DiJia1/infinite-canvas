@@ -107,13 +107,17 @@ func ListWorkflowRuns(ownerUID string, page, pageSize int) ([]model.WorkflowRun,
 	return items, total, err
 }
 
-func ListOpenWorkflowRuns(limit int) ([]model.WorkflowRun, error) {
+func ListOpenWorkflowRuns(afterID string, limit int) ([]model.WorkflowRun, error) {
 	database, err := DB()
 	if err != nil {
 		return nil, err
 	}
 	items := []model.WorkflowRun{}
-	err = database.Where("status IN ?", []string{"pending", "running", "stopping", "attention_required"}).Order("updated_at, id").Limit(limit).Find(&items).Error
+	query := database.Where("status IN ?", []string{"pending", "running", "stopping", "attention_required"})
+	if afterID != "" {
+		query = query.Where("id > ?", afterID)
+	}
+	err = query.Order("id").Limit(limit).Find(&items).Error
 	return items, err
 }
 
@@ -210,11 +214,13 @@ func ClaimWorkflowAttempt(globalLimit, runLimit int, allowNew bool, current time
 		}
 		claimID := workflowClaimID()
 		leaseUntil := current.Add(lease)
+		queuedAt := output.UpdatedAt
 		attempt := model.WorkflowOutputAttempt{
 			ID: workflowAttemptID(), RunID: output.RunID, NodeID: output.NodeID, SlotID: output.SlotID,
 			Attempt: output.Attempt, RequestID: workflowAttemptRequestID(output.RunID, output.NodeID, output.SlotID, output.Attempt),
-			Status: "claimed", ClaimID: claimID, LeaseUntil: &leaseUntil, NextPollAt: current,
-			CreatedAt: current, UpdatedAt: current,
+			RetryRequestID: output.RetryRequestID,
+			Status:         "claimed", ClaimID: claimID, LeaseUntil: &leaseUntil, NextPollAt: current,
+			QueuedAt: &queuedAt, CreatedAt: current, UpdatedAt: current,
 		}
 		var run model.WorkflowRun
 		if err := tx.Where("id = ?", output.RunID).First(&run).Error; err != nil {
@@ -287,7 +293,7 @@ func UpdateClaimedWorkflowAttempt(item model.WorkflowOutputAttempt, outputStatus
 // AuthorizeWorkflowAttemptSubmission is the durable Stop boundary. Once it
 // returns true the local generation task may be created or recovered even if a
 // Stop request arrives immediately afterwards.
-func AuthorizeWorkflowAttemptSubmission(item model.WorkflowOutputAttempt, current time.Time) (bool, error) {
+func AuthorizeWorkflowAttemptSubmission(item model.WorkflowOutputAttempt, allowSubmission bool, current time.Time) (bool, error) {
 	database, err := DB()
 	if err != nil {
 		return false, err
@@ -313,8 +319,19 @@ func AuthorizeWorkflowAttemptSubmission(item model.WorkflowOutputAttempt, curren
 			}
 			return tx.Model(&model.WorkflowRun{}).Where("id = ?", item.RunID).Updates(map[string]any{"updated_at": current, "state_version": gorm.Expr("state_version + 1")}).Error
 		}
+		if !allowSubmission {
+			result := tx.Model(&model.WorkflowOutputAttempt{}).Where("id = ? AND claim_id = ? AND lease_until > ? AND status = 'claimed'", item.ID, item.ClaimID, current).
+				Updates(map[string]any{"claim_id": "", "lease_until": nil, "next_poll_at": current.Add(5 * time.Second), "updated_at": current})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return ErrWorkflowLeaseLost
+			}
+			return nil
+		}
 		result := tx.Model(&model.WorkflowOutputAttempt{}).Where("id = ? AND claim_id = ? AND lease_until > ? AND status = 'claimed'", item.ID, item.ClaimID, current).
-			Updates(map[string]any{"status": "submitting", "updated_at": current})
+			Updates(map[string]any{"status": "submitting", "started_at": gorm.Expr("COALESCE(started_at, ?)", current), "updated_at": current})
 		if result.Error != nil {
 			return result.Error
 		}
@@ -337,7 +354,7 @@ func RequestWorkflowRunStop(ownerUID, id string, current time.Time) (bool, error
 	return result.RowsAffected > 0, result.Error
 }
 
-func RetryWorkflowOutput(ownerUID, runID, nodeID, slotID string, current time.Time) (model.WorkflowOutputExecution, error) {
+func RetryWorkflowOutput(ownerUID, runID, nodeID, slotID, retryRequestID string, current time.Time) (model.WorkflowOutputExecution, error) {
 	database, err := DB()
 	if err != nil {
 		return model.WorkflowOutputExecution{}, err
@@ -348,17 +365,29 @@ func RetryWorkflowOutput(ownerUID, runID, nodeID, slotID string, current time.Ti
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("owner_uid = ? AND id = ?", ownerUID, runID).First(&run).Error; err != nil {
 			return ErrWorkflowRunNotFound
 		}
-		if run.StopRequested || run.Status == "stopped" {
-			return ErrWorkflowRunActive
-		}
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("run_id = ? AND node_id = ? AND slot_id = ?", runID, nodeID, slotID).First(&output).Error; err != nil {
 			return err
+		}
+		if output.RetryRequestID == retryRequestID {
+			return nil
+		}
+		var priorRetry int64
+		if err := tx.Model(&model.WorkflowOutputAttempt{}).
+			Where("run_id = ? AND node_id = ? AND slot_id = ? AND retry_request_id = ?", runID, nodeID, slotID, retryRequestID).
+			Count(&priorRetry).Error; err != nil {
+			return err
+		}
+		if priorRetry > 0 {
+			return nil
+		}
+		if run.StopRequested || run.Status == "stopped" {
+			return ErrWorkflowRunActive
 		}
 		if output.Status != "failed" {
 			return ErrWorkflowRunActive
 		}
 		output.Attempt++
-		output.Status, output.Error, output.MediaID, output.UpdatedAt = "waiting", "", "", current
+		output.Status, output.Error, output.MediaID, output.RetryRequestID, output.UpdatedAt = "waiting", "", "", retryRequestID, current
 		if err := tx.Save(&output).Error; err != nil {
 			return err
 		}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/basketikun/infinite-canvas/ai"
@@ -23,6 +24,13 @@ const (
 var (
 	workflowCreateImageTask = CreateImageTask
 	workflowGetImageTask    = GetImageTaskByClientRequest
+	workflowCreateVideoTask = CreateVideoGenerationTask
+	workflowGetVideoTask    = GetVideoGenerationTaskByClient
+	workflowResumeVideoTask = ResumeVideoGenerationTask
+	workflowRunScan         struct {
+		sync.Mutex
+		afterID string
+	}
 )
 
 func workflowsEnabled() bool {
@@ -86,23 +94,35 @@ func RunWorkflowSchedulerOnce(ctx context.Context) (bool, error) {
 		}
 		processed = true
 		if err := processWorkflowAttempt(ctx, attempt); err != nil && !errors.Is(err, repository.ErrWorkflowLeaseLost) {
-			return true, err
+			return true, fmt.Errorf("workflow attempt run=%s node=%s slot=%s attempt=%d task=%s: %w", attempt.RunID, attempt.NodeID, attempt.SlotID, attempt.Attempt, attempt.TaskID, err)
 		}
 		if err := reevaluateWorkflowRun(attempt.OwnerUID, attempt.RunID); err != nil {
-			return true, err
+			return true, fmt.Errorf("workflow evaluation run=%s after node=%s slot=%s attempt=%d: %w", attempt.RunID, attempt.NodeID, attempt.SlotID, attempt.Attempt, err)
 		}
 	}
 	return processed, nil
 }
 
 func reevaluateOpenWorkflowRuns() error {
-	runs, err := repository.ListOpenWorkflowRuns(200)
+	workflowRunScan.Lock()
+	defer workflowRunScan.Unlock()
+	runs, err := repository.ListOpenWorkflowRuns(workflowRunScan.afterID, 200)
 	if err != nil {
 		return err
 	}
+	if len(runs) == 0 && workflowRunScan.afterID != "" {
+		workflowRunScan.afterID = ""
+		runs, err = repository.ListOpenWorkflowRuns("", 200)
+		if err != nil {
+			return err
+		}
+	}
+	if len(runs) > 0 {
+		workflowRunScan.afterID = runs[len(runs)-1].ID
+	}
 	for _, run := range runs {
 		if err := reevaluateWorkflowRun(run.OwnerUID, run.ID); err != nil {
-			return err
+			return fmt.Errorf("workflow evaluation run=%s: %w", run.ID, err)
 		}
 	}
 	return nil
@@ -117,10 +137,6 @@ func reevaluateWorkflowRun(ownerUID, runID string) error {
 	if err := json.Unmarshal([]byte(record.Run.Snapshot), &graph); err != nil {
 		return err
 	}
-	nodes := map[string]model.WorkflowNode{}
-	for _, node := range graph.Nodes {
-		nodes[node.ID] = node
-	}
 	updates := []model.WorkflowOutputExecution{}
 	for index := range record.Outputs {
 		output := &record.Outputs[index]
@@ -131,7 +147,6 @@ func reevaluateWorkflowRun(ownerUID, runID string) error {
 		if record.Run.StopRequested {
 			next = "stopped"
 		} else {
-			node := nodes[output.NodeID]
 			resolved, resolveErr := resolveWorkflowInputs(graph, output.NodeID, record.Outputs)
 			switch {
 			case resolveErr != nil:
@@ -139,10 +154,6 @@ func reevaluateWorkflowRun(ownerUID, runID string) error {
 			case resolved.State == "blocked":
 				next, output.Error = "blocked", "上游输出失败"
 			case resolved.State == "waiting":
-				next, output.Error = "waiting", ""
-			case node.Type == model.WorkflowNodeVideoGeneration:
-				// T5 enables video submission; preserving waiting here prevents any
-				// accidental paid request in the image execution milestone.
 				next, output.Error = "waiting", ""
 			default:
 				next, output.Error = "ready", ""
@@ -267,12 +278,8 @@ func processWorkflowAttempt(ctx context.Context, attempt model.WorkflowOutputAtt
 	if err := json.Unmarshal([]byte(record.Run.Snapshot), &graph); err != nil {
 		return failWorkflowAttempt(attempt, err)
 	}
-	if attempt.TaskID == "" && attempt.Status == "claimed" && !workflowsEnabled() {
-		attempt.Status = "claimed"
-		return repository.UpdateClaimedWorkflowAttempt(attempt, "submitting", time.Now().UTC().Add(5*time.Second), false)
-	}
 	if attempt.TaskID == "" && attempt.Status == "claimed" {
-		authorized, err := repository.AuthorizeWorkflowAttemptSubmission(attempt, time.Now().UTC())
+		authorized, err := repository.AuthorizeWorkflowAttemptSubmission(attempt, workflowsEnabled(), time.Now().UTC())
 		if err != nil || !authorized {
 			return err
 		}
@@ -285,8 +292,14 @@ func processWorkflowAttempt(ctx context.Context, attempt model.WorkflowOutputAtt
 			break
 		}
 	}
-	if node.ID == "" || node.Type != model.WorkflowNodeImageGeneration {
-		return failWorkflowAttempt(attempt, fmt.Errorf("workflow node is not an image generation step"))
+	if node.ID == "" {
+		return failWorkflowAttempt(attempt, fmt.Errorf("workflow generation node not found"))
+	}
+	if node.Type == model.WorkflowNodeVideoGeneration {
+		return processWorkflowVideoAttempt(ctx, attempt, record, graph, node)
+	}
+	if node.Type != model.WorkflowNodeImageGeneration {
+		return failWorkflowAttempt(attempt, fmt.Errorf("workflow node is not a generation step"))
 	}
 	userContext := WithPortalUser(ctx, PortalUser{UID: attempt.OwnerUID})
 	var view ImageTaskView
@@ -295,6 +308,7 @@ func processWorkflowAttempt(ctx context.Context, attempt model.WorkflowOutputAtt
 			return deferWorkflowAttempt(attempt)
 		} else if found {
 			attempt.TaskID, attempt.TaskType = existing.ID, "image"
+			logWorkflowAttempt(attempt, "recovered")
 			view, err = workflowGetImageTask(userContext, attempt.RequestID)
 			if err != nil {
 				return deferWorkflowAttempt(attempt)
@@ -321,6 +335,7 @@ func processWorkflowAttempt(ctx context.Context, attempt model.WorkflowOutputAtt
 				return deferWorkflowAttempt(attempt)
 			} else if found {
 				attempt.TaskID, attempt.TaskType = existing.ID, "image"
+				logWorkflowAttempt(attempt, "recovered")
 				return deferWorkflowAttempt(attempt)
 			}
 			if _, safe := err.(interface{ SafeMessage() string }); !safe {
@@ -329,6 +344,7 @@ func processWorkflowAttempt(ctx context.Context, attempt model.WorkflowOutputAtt
 			return failWorkflowAttempt(attempt, err)
 		}
 		attempt.TaskID, attempt.TaskType = view.ID, "image"
+		logWorkflowAttempt(attempt, "submitted")
 	} else {
 		view, err = workflowGetImageTask(userContext, attempt.RequestID)
 		if err != nil {
@@ -336,6 +352,76 @@ func processWorkflowAttempt(ctx context.Context, attempt model.WorkflowOutputAtt
 		}
 	}
 	return applyWorkflowImageView(attempt, view)
+}
+
+func processWorkflowVideoAttempt(ctx context.Context, attempt model.WorkflowOutputAttempt, record repository.WorkflowRunRecord, graph model.WorkflowGraph, node model.WorkflowNode) error {
+	userContext := WithPortalUser(ctx, PortalUser{UID: attempt.OwnerUID})
+	var view VideoTaskView
+	var err error
+	if attempt.TaskID == "" {
+		if existing, found, lookupErr := repository.GetVideoGenerationTaskByClient(attempt.OwnerUID, attempt.RequestID); lookupErr != nil {
+			return deferWorkflowAttempt(attempt)
+		} else if found {
+			attempt.TaskID, attempt.TaskType = existing.ID, "video"
+			logWorkflowAttempt(attempt, "recovered")
+			view, err = workflowGetVideoTask(userContext, attempt.RequestID)
+			if err != nil {
+				return deferWorkflowAttempt(attempt)
+			}
+			view, err = resumeWorkflowVideoTaskIfPaused(userContext, view)
+			if err != nil {
+				return deferWorkflowAttempt(attempt)
+			}
+			return applyWorkflowVideoView(attempt, view)
+		}
+		if err := requireEnabledWorkflowMember(attempt.OwnerUID); err != nil {
+			return failWorkflowAttempt(attempt, err)
+		}
+		resolved, err := resolveWorkflowInputs(graph, node.ID, record.Outputs)
+		if err != nil || resolved.State != "ready" {
+			if err == nil {
+				err = fmt.Errorf("workflow inputs are no longer ready")
+			}
+			return failWorkflowAttempt(attempt, err)
+		}
+		request, err := workflowVideoRequest(node, resolved, attempt.RequestID)
+		if err != nil {
+			return failWorkflowAttempt(attempt, err)
+		}
+		view, err = workflowCreateVideoTask(userContext, request)
+		if err != nil {
+			if existing, found, lookupErr := repository.GetVideoGenerationTaskByClient(attempt.OwnerUID, attempt.RequestID); lookupErr != nil {
+				return deferWorkflowAttempt(attempt)
+			} else if found {
+				attempt.TaskID, attempt.TaskType = existing.ID, "video"
+				logWorkflowAttempt(attempt, "recovered")
+				return deferWorkflowAttempt(attempt)
+			}
+			if _, safe := err.(interface{ SafeMessage() string }); !safe {
+				return deferWorkflowAttempt(attempt)
+			}
+			return failWorkflowAttempt(attempt, err)
+		}
+		attempt.TaskID, attempt.TaskType = view.ID, "video"
+		logWorkflowAttempt(attempt, "submitted")
+	} else {
+		view, err = workflowGetVideoTask(userContext, attempt.RequestID)
+		if err != nil {
+			return deferWorkflowAttempt(attempt)
+		}
+	}
+	view, err = resumeWorkflowVideoTaskIfPaused(userContext, view)
+	if err != nil {
+		return deferWorkflowAttempt(attempt)
+	}
+	return applyWorkflowVideoView(attempt, view)
+}
+
+func resumeWorkflowVideoTaskIfPaused(ctx context.Context, view VideoTaskView) (VideoTaskView, error) {
+	if view.Status != "paused" || strings.TrimSpace(view.ID) == "" {
+		return view, nil
+	}
+	return workflowResumeVideoTask(ctx, view.ID)
 }
 
 func deferWorkflowAttempt(attempt model.WorkflowOutputAttempt) error {
@@ -347,7 +433,7 @@ func deferWorkflowAttempt(attempt model.WorkflowOutputAttempt) error {
 		attempt.Status = "running"
 	}
 	attempt.Error = ""
-	return repository.UpdateClaimedWorkflowAttempt(attempt, outputStatus, time.Now().UTC().Add(2*workflowPollDelay), false)
+	return persistWorkflowAttempt(attempt, outputStatus, time.Now().UTC().Add(2*workflowPollDelay), false, "")
 }
 
 func workflowImageRequest(node model.WorkflowNode, inputs workflowResolvedInputs, requestID string) (CreateImageTaskRequest, error) {
@@ -373,6 +459,21 @@ func workflowImageRequest(node model.WorkflowNode, inputs workflowResolvedInputs
 	}, nil
 }
 
+func workflowVideoRequest(node model.WorkflowNode, inputs workflowResolvedInputs, requestID string) (CreateVideoTaskRequest, error) {
+	if node.Config == nil || node.Config.Seconds == nil {
+		return CreateVideoTaskRequest{}, workflowValidationError{message: "视频节点配置无效"}
+	}
+	generateAudio := false
+	if node.Config.GenerateAudio != nil {
+		generateAudio = *node.Config.GenerateAudio
+	}
+	return CreateVideoTaskRequest{
+		ClientRequestID: requestID, ProviderID: node.Config.ProviderID, Prompt: inputs.Prompt,
+		Seconds: *node.Config.Seconds, Size: node.Config.Size, Resolution: node.Config.Resolution, GenerateAudio: generateAudio,
+		ImageMediaIDs: append([]string{}, inputs.ImageMediaIDs...), VideoMediaIDs: append([]string{}, inputs.VideoMediaIDs...),
+	}, nil
+}
+
 func applyWorkflowImageView(attempt model.WorkflowOutputAttempt, view ImageTaskView) error {
 	nextPoll := time.Now().UTC().Add(workflowPollDelay)
 	switch view.Status {
@@ -381,25 +482,66 @@ func applyWorkflowImageView(attempt model.WorkflowOutputAttempt, view ImageTaskV
 			return failWorkflowAttempt(attempt, errors.New("image task succeeded without one persisted media result"))
 		}
 		attempt.Status, attempt.MediaID, attempt.Error = "succeeded", view.Images[0].MediaID, ""
-		return repository.UpdateClaimedWorkflowAttempt(attempt, "succeeded", nextPoll, true)
+		return persistWorkflowAttempt(attempt, "succeeded", nextPoll, true, "succeeded")
 	case string(model.ImageTaskFailed):
 		attempt.Status, attempt.Error = "failed", strings.TrimSpace(view.Error)
 		if attempt.Error == "" {
 			attempt.Error = "图片生成失败"
 		}
-		return repository.UpdateClaimedWorkflowAttempt(attempt, "failed", nextPoll, true)
+		return persistWorkflowAttempt(attempt, "failed", nextPoll, true, "failed")
 	case string(model.ImageTaskUncertain):
 		attempt.Status, attempt.Error = "uncertain", strings.TrimSpace(view.Error)
-		return repository.UpdateClaimedWorkflowAttempt(attempt, "uncertain", time.Now().UTC().Add(5*time.Second), false)
+		return persistWorkflowAttempt(attempt, "uncertain", time.Now().UTC().Add(5*time.Second), false, "uncertain")
 	default:
 		attempt.Status, attempt.Error = "running", ""
-		return repository.UpdateClaimedWorkflowAttempt(attempt, "running", nextPoll, false)
+		return persistWorkflowAttempt(attempt, "running", nextPoll, false, "")
+	}
+}
+
+func applyWorkflowVideoView(attempt model.WorkflowOutputAttempt, view VideoTaskView) error {
+	nextPoll := time.Now().UTC().Add(workflowPollDelay)
+	switch view.Status {
+	case "succeeded":
+		if len(view.ResultMediaIDs) != 1 || strings.TrimSpace(view.ResultMediaIDs[0]) == "" {
+			return failWorkflowAttempt(attempt, errors.New("video task succeeded without one persisted media result"))
+		}
+		attempt.Status, attempt.MediaID, attempt.Error = "succeeded", view.ResultMediaIDs[0], ""
+		return persistWorkflowAttempt(attempt, "succeeded", nextPoll, true, "succeeded")
+	case "failed":
+		attempt.Status, attempt.Error = "failed", strings.TrimSpace(view.Error)
+		if attempt.Error == "" {
+			attempt.Error = "视频生成失败"
+		}
+		return persistWorkflowAttempt(attempt, "failed", nextPoll, true, "failed")
+	case "uncertain", "paused":
+		attempt.Status, attempt.Error = "uncertain", strings.TrimSpace(view.Error)
+		return persistWorkflowAttempt(attempt, "uncertain", time.Now().UTC().Add(5*time.Second), false, "uncertain")
+	case "queued", "submitting", "running", "saving":
+		attempt.Status, attempt.Error = "running", ""
+		return persistWorkflowAttempt(attempt, "running", nextPoll, false, "")
+	default:
+		attempt.Status, attempt.Error = "uncertain", "视频任务状态需要确认"
+		return persistWorkflowAttempt(attempt, "uncertain", time.Now().UTC().Add(5*time.Second), false, "uncertain")
 	}
 }
 
 func failWorkflowAttempt(attempt model.WorkflowOutputAttempt, err error) error {
 	attempt.Status, attempt.Error = "failed", workflowAttemptError(err)
-	return repository.UpdateClaimedWorkflowAttempt(attempt, "failed", time.Now().UTC(), true)
+	return persistWorkflowAttempt(attempt, "failed", time.Now().UTC(), true, "failed")
+}
+
+func persistWorkflowAttempt(attempt model.WorkflowOutputAttempt, outputStatus string, nextPollAt time.Time, terminal bool, logStatus string) error {
+	if err := repository.UpdateClaimedWorkflowAttempt(attempt, outputStatus, nextPollAt, terminal); err != nil {
+		return fmt.Errorf("persist workflow attempt task=%s type=%s status=%s: %w", attempt.TaskID, attempt.TaskType, attempt.Status, err)
+	}
+	if logStatus != "" {
+		logWorkflowAttempt(attempt, logStatus)
+	}
+	return nil
+}
+
+func logWorkflowAttempt(attempt model.WorkflowOutputAttempt, status string) {
+	log.Printf("workflow attempt run=%s node=%s slot=%s attempt=%d task=%s type=%s status=%s", attempt.RunID, attempt.NodeID, attempt.SlotID, attempt.Attempt, attempt.TaskID, attempt.TaskType, status)
 }
 
 func workflowAttemptError(err error) string {

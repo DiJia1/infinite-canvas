@@ -87,7 +87,8 @@ func seedWorkerVideo(t *testing.T, status string, p workerVideoProvider) (model.
 	if err := ai.Register(ai.ProviderType{ID: typ, Name: typ, Capabilities: []ai.Capability{ai.CapabilityVideoGenerate}, New: func(json.RawMessage) (ai.Provider, error) { return p, nil }}); err != nil {
 		t.Fatal(err)
 	}
-	item := model.VideoGenerationTask{ID: id, OwnerUID: "video-test-owner", ClientRequestID: id, Status: status, ProviderType: typ, ProviderTaskID: "upstream", InputMediaIDsJSON: "[]", ResultMediaIDsJSON: "[]", ResultURLsJSON: "[]", OperationLogID: id + "-op", NextPollAt: current, Deadline: current.Add(time.Hour), ClaimID: "claim"}
+	leaseUntil := current.Add(2 * time.Minute)
+	item := model.VideoGenerationTask{ID: id, OwnerUID: "video-test-owner", ClientRequestID: id, Status: status, ProviderType: typ, ProviderTaskID: "upstream", InputMediaIDsJSON: "[]", ResultMediaIDsJSON: "[]", ResultURLsJSON: "[]", OperationLogID: id + "-op", NextPollAt: current, Deadline: current.Add(time.Hour), ClaimID: "claim", LeaseUntil: &leaseUntil}
 	db, _ := repository.DB()
 	if err := db.Create(&item).Error; err != nil {
 		t.Fatal(err)
@@ -192,7 +193,11 @@ func TestVideoOutputReservationSurvivesInterruptedSave(t *testing.T) {
 	if first.PendingOutputsJSON == "" {
 		t.Fatal("object write had no durable reservation")
 	}
-	if err := processVideoTaskStep(context.Background(), first, current.Add(12*time.Second)); err != nil {
+	reclaimed, found, err := repository.ClaimNextVideoGenerationTask(current.Add(12 * time.Second))
+	if err != nil || !found || reclaimed.ID != first.ID {
+		t.Fatalf("reclaim interrupted save = %#v, %v, %v", reclaimed, found, err)
+	}
+	if err := processVideoTaskStep(context.Background(), reclaimed, current.Add(12*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	second := readWorkerVideo(t, item)

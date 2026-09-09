@@ -106,6 +106,30 @@ func TestVideoTaskWorkersClaimOnceAndFenceOldLease(t *testing.T) {
 		t.Fatal("poll scheduled too early", err)
 	}
 }
+
+func TestVideoTaskRejectsWritesAfterLeaseExpiresWithoutReplacement(t *testing.T) {
+	item, current := videoFixture(t)
+	createVideoFixture(t, item)
+	claimed, found, err := ClaimNextVideoGenerationTask(current)
+	if err != nil || !found || claimed.ID != item.ID {
+		t.Fatalf("claim = %#v, %v, %v", claimed, found, err)
+	}
+	database, _ := DB()
+	if err := database.Model(&model.VideoGenerationTask{}).Where("id = ?", claimed.ID).Updates(map[string]any{"lease_until": current.Add(-time.Second), "status": "saving"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateClaimedVideoTask(claimed, map[string]any{"status": "running"}); !errors.Is(err, ErrVideoLeaseLost) {
+		t.Fatalf("expired UpdateClaimedVideoTask() error = %v", err)
+	}
+	claimed.Status = "saving"
+	if err := CompleteVideoGenerationTask(claimed, []model.Media{{ID: "expired-video-result", OwnerUID: claimed.OwnerUID}}); !errors.Is(err, ErrVideoLeaseLost) {
+		t.Fatalf("expired CompleteVideoGenerationTask() error = %v", err)
+	}
+	if err := FinishFailedVideoTask(claimed, "late failure", current); !errors.Is(err, ErrVideoLeaseLost) {
+		t.Fatalf("expired FinishFailedVideoTask() error = %v", err)
+	}
+}
+
 func TestVideoCompletionRollsBackAndCanConverge(t *testing.T) {
 	item, current := videoFixture(t)
 	createVideoFixture(t, item)
