@@ -5,6 +5,8 @@ import { createCanvasGenerationController } from "./use-canvas-generation.ts";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "../types.ts";
 import type { AiConfig } from "@/lib/ai-config";
 import type { ImageGenerationTask } from "@/services/api/image";
+import type { VideoGenerationTask } from "@/services/api/video";
+import type { StoredCanvasImage } from "@/services/canvas-image-hydration";
 
 type Ref<T> = { current: T };
 
@@ -724,3 +726,197 @@ test("retrying an uncertain image observes the original task without a new submi
     assert.equal(nodesRef.current[0].metadata?.imageTaskId, "original");
     assert.equal(nodesRef.current[0].metadata?.errorDetails, "提交结果待确认");
 });
+
+const settleGeneration = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+function completedVideoTask(id: string): VideoGenerationTask {
+    return { id: `task-${id}`, status: "succeeded", progress: 100, resultMediaIds: [`media-${id}`], videos: [{ mediaId: `media-${id}`, url: `https://example.test/${id}.mp4` }] };
+}
+
+function pendingGenerationNode(kind: "image" | "video", id = "old") {
+    return node("result", kind === "image" ? CanvasNodeType.Image : CanvasNodeType.Video, {
+        status: "loading",
+        [`${kind}TaskId`]: `task-${id}`,
+        [`${kind}TaskClientRequestId`]: `client-${id}`,
+    });
+}
+
+test("image context hydration cannot create results in a later account, project or canonical generation", async () => {
+    for (const nextScope of ["account-b:project:1", "account-a:other-project:1", "account-a:project:2"]) {
+        let scope = "account-a:project:1";
+        const hydration = deferred<{ prompt: string; referenceImages: []; textCount: number; imageCount: number }>();
+        const { controller, nodesRef, calls } = setup([node("source", CanvasNodeType.Config)], [], {
+            getSessionScope: () => scope,
+            hydrateGenerationContext: () => hydration.promise,
+        });
+        const generation = controller.generateNode("source", "image", "forest");
+        scope = nextScope;
+        const replacement = [node("source", CanvasNodeType.Config, { prompt: "current" })];
+        nodesRef.current = replacement;
+        hydration.resolve({ prompt: "forest", referenceImages: [], textCount: 0, imageCount: 0 });
+        await generation;
+        assert.equal(nodesRef.current, replacement);
+        assert.equal(calls.generation, 0);
+    }
+});
+
+for (const kind of ["image", "video"] as const) {
+    test(`${kind} create completion cannot overwrite a replacement task on the same node`, async () => {
+        const created = deferred<ImageGenerationTask | VideoGenerationTask>();
+        const { controller, nodesRef } = setup([node("result", kind === "image" ? CanvasNodeType.Image : CanvasNodeType.Video)], [], {
+            [kind === "image" ? "requestGeneration" : "requestVideoGeneration"]: () => created.promise,
+        });
+        const generation = controller.generateNode("result", kind, "forest");
+        await settleGeneration();
+        const replacement = [pendingGenerationNode(kind, "new")];
+        nodesRef.current = replacement;
+        created.resolve(kind === "image" ? completedTask("old", "media-old") : completedVideoTask("old"));
+        await generation;
+        assert.equal(nodesRef.current, replacement);
+    });
+
+    for (const replacementKind of ["task", "client", "scope"] as const) {
+        test(`${kind} observation ignores a stale ${replacementKind} and lets its replacement observation complete`, async () => {
+            let scope = "account:project:1";
+            const old = deferred<ImageGenerationTask | VideoGenerationTask>();
+            let reads = 0;
+            const { controller, nodesRef } = setup([pendingGenerationNode(kind)], [], {
+                getSessionScope: () => scope,
+                [kind === "image" ? "getImageTask" : "getVideoTask"]: (id: string) => {
+                    reads++;
+                    return reads === 1 ? old.promise : Promise.resolve({ ...(kind === "image" ? completedTask("new", "media-new") : completedVideoTask("new")), id });
+                },
+            });
+            controller.resumePendingImageTasks();
+            const replacement = pendingGenerationNode(kind, "new");
+            if (replacementKind === "client") replacement.metadata![`${kind}TaskId`] = "task-old";
+            if (replacementKind === "scope") {
+                scope = "account:project:2";
+                replacement.metadata = { ...pendingGenerationNode(kind).metadata };
+            }
+            nodesRef.current = [replacement];
+            controller.resumePendingImageTasks();
+            await settleGeneration();
+            assert.equal(nodesRef.current[0].metadata?.mediaId, "media-new");
+            const current = nodesRef.current;
+            old.resolve(kind === "image" ? completedTask("old", "media-old") : completedVideoTask("old"));
+            await settleGeneration();
+            assert.equal(nodesRef.current, current);
+        });
+    }
+
+    test(`${kind} completion merges into current nodes during Undo and Redo`, async () => {
+        const result = deferred<ImageGenerationTask | VideoGenerationTask>();
+        const { controller, nodesRef } = setup([pendingGenerationNode(kind)], [], {
+            [kind === "image" ? "getImageTask" : "getVideoTask"]: () => result.promise,
+        });
+        controller.resumePendingImageTasks();
+        const restored = { ...pendingGenerationNode(kind), title: "restored title", position: { x: 123, y: 456 } };
+        const laterEdit = node("later-edit", CanvasNodeType.Text, { content: "keep me" });
+        nodesRef.current = [restored, laterEdit];
+        result.resolve(kind === "image" ? completedTask("old", "media-old") : completedVideoTask("old"));
+        await settleGeneration();
+        assert.equal(nodesRef.current[0].title, "restored title");
+        assert.equal(nodesRef.current[0].position.x + nodesRef.current[0].width / 2, 293);
+        assert.equal(nodesRef.current[0].metadata?.mediaId, "media-old");
+        assert.equal(nodesRef.current[1], laterEdit);
+    });
+
+    test(`${kind} result rechecks task identity when the queued functional updater executes`, async () => {
+        const updates: Array<(previous: CanvasNodeData[]) => CanvasNodeData[]> = [];
+        const { controller, nodesRef } = setup([pendingGenerationNode(kind)], [], {
+            [kind === "image" ? "getImageTask" : "getVideoTask"]: async () => kind === "image" ? completedTask("old", "media-old") : completedVideoTask("old"),
+            setNodes: (update: (previous: CanvasNodeData[]) => CanvasNodeData[]) => updates.push(update),
+        });
+        controller.resumePendingImageTasks();
+        await settleGeneration();
+        assert.ok(updates.length > 0);
+        const replacement = [pendingGenerationNode(kind, "new")];
+        nodesRef.current = replacement;
+        for (const update of updates) nodesRef.current = update(nodesRef.current);
+        assert.equal(nodesRef.current, replacement);
+    });
+
+    test(`${kind} query failure cannot mark a newer task as failed`, async () => {
+        const query = deferred<void>();
+        const { controller, nodesRef } = setup([pendingGenerationNode(kind)], [], {
+            [kind === "image" ? "getImageTask" : "getVideoTask"]: async () => {
+                await query.promise;
+                throw new Error("old task failed");
+            },
+        });
+        controller.resumePendingImageTasks();
+        const replacement = [pendingGenerationNode(kind, "new")];
+        nodesRef.current = replacement;
+        query.resolve();
+        await settleGeneration();
+        assert.equal(nodesRef.current, replacement);
+    });
+
+    test(`${kind} retry query cannot rebind an old result to a replacement task`, async () => {
+        const query = deferred<ImageGenerationTask | VideoGenerationTask>();
+        const original = pendingGenerationNode(kind);
+        original.metadata!.status = "error";
+        const { controller, nodesRef } = setup([original], [], {
+            [kind === "image" ? "getImageTask" : "getVideoTask"]: () => query.promise,
+        });
+        const retry = controller.retryNode(original);
+        const replacement = [pendingGenerationNode(kind, "new")];
+        nodesRef.current = replacement;
+        query.resolve(kind === "image" ? completedTask("old", "media-old") : completedVideoTask("old"));
+        await retry;
+        await settleGeneration();
+        assert.equal(nodesRef.current, replacement);
+    });
+
+    test(`${kind} submission failure rechecks identity in every queued node update`, async () => {
+        const submitted = deferred<void>();
+        const updates: Array<(previous: CanvasNodeData[]) => CanvasNodeData[]> = [];
+        let queue = false;
+        const state = setup([node("result", kind === "image" ? CanvasNodeType.Image : CanvasNodeType.Video)], [], {
+            [kind === "image" ? "requestGeneration" : "requestVideoGeneration"]: async () => {
+                await submitted.promise;
+                throw new Error("submission failed");
+            },
+            [kind === "image" ? "getImageTaskByClientRequest" : "getVideoTaskByClientRequest"]: async () => { throw new Error("missing request"); },
+            setNodes: (update: (previous: CanvasNodeData[]) => CanvasNodeData[]) => {
+                if (queue) updates.push(update);
+                else state.nodesRef.current = update(state.nodesRef.current);
+            },
+        });
+        const generation = state.controller.generateNode("result", kind, "forest");
+        await settleGeneration();
+        queue = true;
+        submitted.resolve();
+        await generation;
+        const replacement = [pendingGenerationNode(kind, "new")];
+        state.nodesRef.current = replacement;
+        for (const update of updates) state.nodesRef.current = update(state.nodesRef.current);
+        assert.equal(state.nodesRef.current, replacement);
+    });
+}
+
+for (const reason of ["scope", "replacement", "deleted-child"] as const) {
+    test(`image upload completion ignores ${reason} without populating its batch root`, async () => {
+        let scope = "account:project:1";
+        const uploaded = deferred<StoredCanvasImage>();
+        const root = node("root", CanvasNodeType.Image, { isBatchRoot: true, batchChildIds: ["result"] });
+        const child = pendingGenerationNode("image");
+        child.metadata!.batchRootId = "root";
+        const { controller, nodesRef } = setup([root, child], [], {
+            getSessionScope: () => scope,
+            getImageTask: async () => completedTask("old", "media-old"),
+            uploadImage: () => uploaded.promise,
+        });
+        controller.resumePendingImageTasks();
+        await settleGeneration();
+        if (reason === "scope") scope = "account:project:2";
+        if (reason === "replacement") nodesRef.current = [root, pendingGenerationNode("image", "new")];
+        if (reason === "deleted-child") nodesRef.current = [root];
+        const replacement = nodesRef.current;
+        uploaded.resolve({ url: "blob:old", storageKey: "media:old", mediaId: "media-old", width: 512, height: 512, bytes: 12, mimeType: "image/png" });
+        await settleGeneration();
+        assert.equal(nodesRef.current, replacement);
+        assert.equal(nodesRef.current[0].metadata?.mediaId, undefined);
+    });
+}

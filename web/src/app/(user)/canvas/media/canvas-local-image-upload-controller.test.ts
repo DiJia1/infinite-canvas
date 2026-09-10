@@ -6,6 +6,31 @@ import { createCanvasLocalImageUploadController } from "./canvas-local-image-upl
 const file = new File(["local image"], "local.png", { type: "image/png" });
 const localImage = { url: "blob:local", storageKey: "image:local", width: 640, height: 480, bytes: file.size, mimeType: "image/png" };
 
+for (const phase of ["upload", "promote"] as const) {
+    for (const action of ["cancel", "dispose"] as const) {
+        test(`${action} ignores ${phase} completion even when the dependency resolves after abort`, async () => {
+            let finish!: () => void;
+            const deferred = new Promise<void>((resolve) => { finish = resolve; });
+            const completed: string[] = [];
+            let promoting!: () => void;
+            const promotionStarted = new Promise<void>((resolve) => { promoting = resolve; });
+            const controller = createCanvasLocalImageUploadController({
+                upload: async () => { if (phase === "upload") await deferred; return { mediaId: "old", url: "remote" }; },
+                promote: async (image) => { promoting(); if (phase === "promote") await deferred; return image; },
+                onProgress: () => undefined, onFailed: () => undefined,
+                onCompleted: (_node, _image, remote) => { completed.push(remote.mediaId); },
+            });
+            const running = controller.start({ nodeId: "A", file, image: localImage, intent: "canvas" });
+            if (phase === "promote") await promotionStarted;
+            if (action === "cancel") controller.cancel("A"); else controller.dispose();
+            finish();
+            await running;
+            assert.deepEqual(completed, [], "cancelled uploads must never update restored nodes");
+            assert.equal(controller.isActive("A"), false);
+        });
+    }
+}
+
 test("promotes an immediately displayed local image after its background upload completes", async () => {
     const events: string[] = [];
     const controller = createCanvasLocalImageUploadController({

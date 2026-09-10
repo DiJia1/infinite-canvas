@@ -985,6 +985,18 @@ test("promoting an already-stable media key is idempotent and keeps the target b
     assert.equal(await store.getItem(key), blob);
 });
 
+test("promotion can retain a local source still referenced by undo history", async () => {
+    const { operations, store, revoked } = createTestOperations({ objectUrls: new Map([["local-history", "blob:history"]]) });
+    const blob = new Blob(["undo image"], { type: "image/png" });
+    await store.setItem("local-history", blob);
+    const promoted = await operations.promoteImageStorageKey({ url: "blob:history", storageKey: "local-history", width: 100, height: 100, bytes: blob.size, mimeType: blob.type }, "uploaded", { retainSource: true });
+    assert.equal(await store.getItem("local-history"), blob);
+    assert.equal(await store.getItem(promoted.storageKey), blob);
+    assert.notEqual(promoted.url, "blob:history", "releasing the uploaded view must not revoke the undo view");
+    operations.releaseObjectURL(promoted.storageKey);
+    assert.equal(revoked.includes("blob:history"), false);
+});
+
 test("imageToDataUrl preserves an already-inline data URL", async () => {
     const dataUrl = "data:image/png;base64,aGVsbG8=";
     assert.equal(await imageToDataUrl({ dataUrl }), dataUrl);

@@ -14,14 +14,15 @@ type LocalImageUploadTask = {
     file: File;
     image: UploadedImage;
     intent: LocalImageUploadIntent;
+    scope?: string;
 };
 
 type CanvasLocalImageUploadControllerOptions = {
     upload: (file: File, intent: LocalImageUploadIntent, options: UserImageUploadOptions) => Promise<UploadedRemoteImage>;
     promote: (image: UploadedImage, mediaId: string) => Promise<UploadedImage>;
-    onProgress: (nodeId: string, progress: number) => void;
-    onCompleted: (nodeId: string, image: UploadedImage, remote: UploadedRemoteImage) => void;
-    onFailed: (nodeId: string, error: string) => void;
+    onProgress: (nodeId: string, progress: number, source: LocalImageUploadTask) => void;
+    onCompleted: (nodeId: string, image: UploadedImage, remote: UploadedRemoteImage, source: LocalImageUploadTask) => void;
+    onFailed: (nodeId: string, error: string, source: LocalImageUploadTask) => void;
 };
 
 function isUploadAbort(error: unknown) {
@@ -31,7 +32,8 @@ function isUploadAbort(error: unknown) {
 export function createCanvasLocalImageUploadController(options: CanvasLocalImageUploadControllerOptions) {
     const active = new Map<string, AbortController>();
 
-    const start = async ({ nodeId, file, image, intent }: LocalImageUploadTask) => {
+    const start = async (source: LocalImageUploadTask) => {
+        const { nodeId, file, image, intent } = source;
         active.get(nodeId)?.abort();
         const controller = new AbortController();
         active.set(nodeId, controller);
@@ -39,15 +41,15 @@ export function createCanvasLocalImageUploadController(options: CanvasLocalImage
             const remote = await options.upload(file, intent, {
                 signal: controller.signal,
                 onProgress: (progress) => {
-                    if (active.get(nodeId) === controller) options.onProgress(nodeId, progress);
+                    if (active.get(nodeId) === controller && !controller.signal.aborted) options.onProgress(nodeId, progress, source);
                 },
             });
-            if (active.get(nodeId) !== controller) return;
+            if (active.get(nodeId) !== controller || controller.signal.aborted) return;
             const promoted = await options.promote(image, remote.mediaId);
-            if (active.get(nodeId) !== controller) return;
-            options.onCompleted(nodeId, promoted, remote);
+            if (active.get(nodeId) !== controller || controller.signal.aborted) return;
+            options.onCompleted(nodeId, promoted, remote, source);
         } catch (error) {
-            if (active.get(nodeId) === controller && !controller.signal.aborted && !isUploadAbort(error)) options.onFailed(nodeId, error instanceof Error ? error.message : "上传图片失败");
+            if (active.get(nodeId) === controller && !controller.signal.aborted && !isUploadAbort(error)) options.onFailed(nodeId, error instanceof Error ? error.message : "上传图片失败", source);
         } finally {
             if (active.get(nodeId) === controller) active.delete(nodeId);
         }
@@ -55,8 +57,16 @@ export function createCanvasLocalImageUploadController(options: CanvasLocalImage
 
     return {
         start,
-        cancel: (nodeId: string) => active.get(nodeId)?.abort(),
+        cancel: (nodeId: string) => {
+            const controller = active.get(nodeId);
+            active.delete(nodeId);
+            controller?.abort();
+        },
         isActive: (nodeId: string) => active.has(nodeId),
-        dispose: () => active.forEach((controller) => controller.abort()),
+        dispose: () => {
+            const controllers = [...active.values()];
+            active.clear();
+            controllers.forEach((controller) => controller.abort());
+        },
     };
 }

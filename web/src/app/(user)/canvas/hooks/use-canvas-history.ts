@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 const HISTORY_DELAY_MS = 180;
 const HISTORY_LIMIT = 50;
@@ -14,7 +14,7 @@ type HistoryState<TSnapshot> = {
 };
 
 export type CanvasHistoryControllerOptions<TSnapshot> = {
-    applySnapshot: (snapshot: TSnapshot) => void;
+    applySnapshot: (snapshot: TSnapshot, applicationId: number) => TSnapshot | void;
     schedule?: (callback: () => void, delay: number) => Timer;
     clear?: ClearTimer;
     isSameSnapshot?: (left: TSnapshot, right: TSnapshot) => boolean;
@@ -33,7 +33,7 @@ export type CanvasHistoryController<TSnapshot> = {
     resume: () => void;
     reset: () => void;
     replaceBaseline: (snapshot: TSnapshot) => void;
-    completeApplication: (snapshot: TSnapshot) => void;
+    completeApplication: (applicationId: number) => void;
     getRetainedHistory: () => { history: HistoryState<TSnapshot>; lastHistory: TSnapshot | null };
     dispose: () => void;
 };
@@ -50,7 +50,9 @@ export function createCanvasHistoryController<TSnapshot>({
     const isApplyingRef = { current: false };
     let lastHistory: TSnapshot | null = null;
     let pendingSnapshot: TSnapshot | null = null;
-    let pendingApplication: TSnapshot | null = null;
+    let pausedSnapshot: TSnapshot | null = null;
+    let nextApplicationId = 0;
+    let pendingApplicationId: number | null = null;
     let timer: Timer | null = null;
 
     const notify = () => {
@@ -78,9 +80,18 @@ export function createCanvasHistoryController<TSnapshot>({
     };
 
     const apply = (snapshot: TSnapshot) => {
-        pendingApplication = snapshot;
+        const applicationId = ++nextApplicationId;
+        pendingApplicationId = applicationId;
         isApplyingRef.current = true;
-        applySnapshot(snapshot);
+        try {
+            const applied = applySnapshot(snapshot, applicationId);
+            // Normalization is part of restoration, not a new undoable edit.
+            if (pendingApplicationId === applicationId && applied !== undefined) lastHistory = applied;
+        } catch (error) {
+            pendingApplicationId = null;
+            isApplyingRef.current = false;
+            throw error;
+        }
         notify();
     };
 
@@ -94,7 +105,8 @@ export function createCanvasHistoryController<TSnapshot>({
         isPausedRef,
         isApplyingRef,
         observe(snapshot) {
-            if (isPausedRef.current || isApplyingRef.current) return;
+            if (isApplyingRef.current) return;
+            if (isPausedRef.current) { pausedSnapshot = snapshot; return; }
             if (lastHistory === null) {
                 lastHistory = snapshot;
                 return;
@@ -106,6 +118,7 @@ export function createCanvasHistoryController<TSnapshot>({
             timer = schedule(commit, HISTORY_DELAY_MS);
         },
         undo() {
+            if (timer !== null) { clear(timer); commit(); }
             clearTimer();
             const previous = history.past.at(-1);
             if (previous === undefined || lastHistory === null) return;
@@ -116,6 +129,7 @@ export function createCanvasHistoryController<TSnapshot>({
             apply(previous);
         },
         redo() {
+            if (timer !== null) { clear(timer); commit(); }
             clearTimer();
             const next = history.future.at(-1);
             if (next === undefined || lastHistory === null) return;
@@ -126,31 +140,45 @@ export function createCanvasHistoryController<TSnapshot>({
             apply(next);
         },
         pause() {
+            if (timer !== null) { clear(timer); commit(); }
             isPausedRef.current = true;
+            pausedSnapshot = null;
             clearTimer();
         },
         resume() {
             isPausedRef.current = false;
+            if (pausedSnapshot !== null) {
+                clearTimer();
+                pendingSnapshot = pausedSnapshot;
+                pausedSnapshot = null;
+                timer = schedule(commit, HISTORY_DELAY_MS);
+            }
         },
         reset() {
+            pendingApplicationId = null;
+            isApplyingRef.current = false;
+            isPausedRef.current = false;
+            pausedSnapshot = null;
             clearTimer();
             history.past = [];
             history.future = [];
             notify();
         },
         replaceBaseline(snapshot) {
+            pausedSnapshot = null;
+            isPausedRef.current = false;
             clearTimer();
             history.past = [];
             history.future = [];
             lastHistory = snapshot;
-            pendingApplication = null;
+            pendingApplicationId = null;
             isApplyingRef.current = false;
             notify();
         },
-        completeApplication(snapshot) {
-            if (pendingApplication === null || !isSameSnapshot(pendingApplication, snapshot)) return;
+        completeApplication(applicationId) {
+            if (pendingApplicationId !== applicationId) return;
 
-            pendingApplication = null;
+            pendingApplicationId = null;
             isApplyingRef.current = false;
             notify();
         },
@@ -159,13 +187,17 @@ export function createCanvasHistoryController<TSnapshot>({
         },
         dispose() {
             clearTimer();
+            pausedSnapshot = null;
+            pendingApplicationId = null;
+            isApplyingRef.current = false;
+            isPausedRef.current = false;
         },
     };
 }
 
 export type UseCanvasHistoryOptions<TSnapshot> = {
     snapshot: TSnapshot;
-    applySnapshot: (snapshot: TSnapshot) => void;
+    applySnapshot: (snapshot: TSnapshot) => TSnapshot | void;
     isReady: boolean;
     isSameSnapshot?: (left: TSnapshot, right: TSnapshot) => boolean;
 };
@@ -179,11 +211,18 @@ export function useCanvasHistory<TSnapshot>({ snapshot, applySnapshot, isReady, 
     const applySnapshotRef = useRef(applySnapshot);
     applySnapshotRef.current = applySnapshot;
     const [state, setState] = useState({ canUndo: false, canRedo: false });
+    const [committedApplicationId, setCommittedApplicationId] = useState<number | null>(null);
     const controllerRef = useRef<CanvasHistoryController<TSnapshot> | null>(null);
 
     if (!controllerRef.current) {
         controllerRef.current = createCanvasHistoryController({
-            applySnapshot: (next) => applySnapshotRef.current(next),
+            applySnapshot: (next, applicationId) => {
+                const applied = applySnapshotRef.current(next);
+                // This state update shares the synchronous React batch with the
+                // restored editor fields; an unrelated render cannot acknowledge it.
+                setCommittedApplicationId(applicationId);
+                return applied;
+            },
             isSameSnapshot,
             onStateChange: setState,
         });
@@ -191,11 +230,13 @@ export function useCanvasHistory<TSnapshot>({ snapshot, applySnapshot, isReady, 
 
     const controller = controllerRef.current;
 
-    useEffect(() => {
+    useLayoutEffect(() => {
         if (!isReady) return;
+        if (committedApplicationId !== null) controller.completeApplication(committedApplicationId);
+        // Observe after acknowledgement so a result merged into this commit is
+        // retained instead of being discarded as part of history restoration.
         controller.observe(snapshot);
-        controller.completeApplication(snapshot);
-    }, [controller, isReady, snapshot]);
+    }, [committedApplicationId, controller, isReady, snapshot]);
 
     useEffect(() => () => controller.dispose(), [controller]);
 

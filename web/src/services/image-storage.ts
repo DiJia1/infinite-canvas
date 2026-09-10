@@ -607,7 +607,7 @@ export function createImageStorageOperations(options: ImageStorageOperationsOpti
             finish();
         }
     };
-    const promoteImageStorageKey = async (image: UploadedImage, mediaId: string): Promise<UploadedImage> => {
+    const promoteImageStorageKey = async (image: UploadedImage, mediaId: string, { retainSource = false }: { retainSource?: boolean } = {}): Promise<UploadedImage> => {
         const targetKey = imageStorageKeyForMedia(mediaId);
         if (image.storageKey === targetKey) return { ...image, storageKey: targetKey, mediaId };
         const sourceGeneration = currentGeneration(image.storageKey);
@@ -634,6 +634,9 @@ export function createImageStorageOperations(options: ImageStorageOperationsOpti
                     throw error;
                 }
 
+                // Undo or an interrupted upload may still reference the local key.
+                // Existing unused-image cleanup owns its eventual removal.
+                if (retainSource) return { ...image, url: replaceObjectURL(targetKey, blob), storageKey: targetKey, mediaId };
                 const sourceURL = options.objectUrls.get(image.storageKey);
                 const url = sourceURL || replaceObjectURL(targetKey, blob);
                 if (sourceURL) {
@@ -792,8 +795,8 @@ export async function loadMediaThumbnail(mediaId: string, remoteThumbnailURL: Re
     return currentOperations().loadMediaThumbnail(mediaId, remoteThumbnailURL, loadOptions);
 }
 
-export async function promoteImageStorageKey(image: UploadedImage, mediaId: string): Promise<UploadedImage> {
-    return currentOperations().promoteImageStorageKey(image, mediaId);
+export async function promoteImageStorageKey(image: UploadedImage, mediaId: string, options?: { retainSource?: boolean }): Promise<UploadedImage> {
+    return currentOperations().promoteImageStorageKey(image, mediaId, options);
 }
 
 export type RemoteImageAccess = { url: string; previewUrl?: string };
