@@ -27,6 +27,7 @@ export function MobileNavDrawer({ open, activeToolSlug, onClose, onOpenMyAssets,
                     return (
                         <Link
                             key={tool.slug}
+                            aria-current={active ? "page" : undefined}
                             href={appPath(`/${tool.slug}`)}
                             onClick={onClose}
                             className={cn(
@@ -63,6 +64,7 @@ export function MobileNavDrawer({ open, activeToolSlug, onClose, onOpenMyAssets,
                 </button>
                 <Link
                     href={appPath("/workflows")}
+                    aria-current={workflowActive ? "page" : undefined}
                     onClick={onClose}
                     className={cn(
                         "flex items-center gap-3 rounded-lg px-3 py-3 text-base transition",

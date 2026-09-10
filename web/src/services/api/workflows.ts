@@ -34,8 +34,8 @@ export async function deleteWorkflow(id: string, revision: number) {
     await apiDelete<true>(`/api/v1/workflows/${encodeURIComponent(id)}`, undefined, { revision });
 }
 
-export function createWorkflowRun(workflowId: string, requestId: string) {
-    return apiPost<WorkflowRunDetail>(`/api/v1/workflows/${encodeURIComponent(workflowId)}/runs`, { requestId });
+export function createWorkflowRun(workflowId: string, requestId: string, revision?: number) {
+    return apiPost<WorkflowRunDetail>(`/api/v1/workflows/${encodeURIComponent(workflowId)}/runs`, { requestId, ...(revision === undefined ? {} : { revision }) });
 }
 
 export function fetchWorkflowRuns(page = 1, pageSize = 20, workflowId?: string) {

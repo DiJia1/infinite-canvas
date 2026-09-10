@@ -33,6 +33,7 @@ type CanvasImageResourceControllerOptions = {
 };
 
 export type CanvasImageResourceController = {
+    activate: () => void;
     reconcile: (requests: CanvasImageResourceRequest[]) => void;
     get: (nodeId: string) => CanvasImageResource | undefined;
     snapshot: () => ReadonlyMap<string, CanvasImageResource>;
@@ -143,6 +144,7 @@ export function createCanvasImageResourceController({ queue, releaseObjectURL, d
     };
 
     return {
+        activate: () => { disposed = false; },
         reconcile,
         get: (nodeId) => entries.get(nodeId)?.current,
         errors: () => new Map([...entries].flatMap(([id, entry]) => entry.error ? [[id, entry.error] as const] : [])),

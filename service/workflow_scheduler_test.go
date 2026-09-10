@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,8 @@ func TestWorkflowSchedulerRecoversAnExistingTaskAfterOwnerIsDisabled(t *testing.
 		t.Fatalf("authorize = %v, %v", authorized, err)
 	}
 	attempt.Status = "submitting"
+	attempt.CreatedAt = time.Now().UTC().Add(-time.Hour)
+	attempt.Error = "创建生成任务暂时失败"
 	imageTask := model.ImageGenerationTask{ID: "disabled-existing-task", OwnerUID: run.OwnerUID, ClientRequestID: attempt.RequestID, Status: model.ImageTaskRunning, CreatedAt: now(), UpdatedAt: now()}
 	operation := model.OperationLog{ID: "disabled-existing-operation", ActorUID: run.OwnerUID, Status: model.OperationStatusSubmitted, CreatedAt: time.Now().UTC()}
 	imageTask.OperationLogID = operation.ID
@@ -661,5 +664,66 @@ func clearWorkflowRuntimeTables(t *testing.T) {
 		if err := database.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(item).Error; err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestWorkflowSchedulerStopsMissingReferenceWithoutCreatingTask(t *testing.T) {
+	clearWorkflowRuntimeTables(t)
+	oldConfig := config.Cfg
+	config.Cfg.WorkflowEnabled = true
+	oldCreate := workflowCreateImageTask
+	t.Cleanup(func() { config.Cfg = oldConfig; workflowCreateImageTask = oldCreate })
+	seedWorkflowMember(t, "missing-ref-owner", true)
+	run := seedWorkflowImageRun(t, "missing-ref-run", "missing-ref-owner")
+	calls := 0
+	workflowCreateImageTask = func(context.Context, CreateImageTaskRequest) (ImageTaskView, error) {
+		calls++
+		return ImageTaskView{}, fmt.Errorf("wrapped: %w", safeMessageError{message: "参考图片文件不存在，请重新上传或替换图片后重新运行"})
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := RunWorkflowSchedulerOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record, _, _ := repository.GetWorkflowRun(run.OwnerUID, run.ID)
+	if calls != 1 || record.Run.Status != "failed" || record.Attempts[0].TaskID != "" || !strings.Contains(record.Outputs[0].Error, "参考图片文件不存在") {
+		t.Fatalf("calls=%d record=%#v", calls, record)
+	}
+}
+
+func TestWorkflowSchedulerBoundsLocalCreateRetriesAcrossRestartAndKeepsRequestID(t *testing.T) {
+	clearWorkflowRuntimeTables(t)
+	oldConfig := config.Cfg
+	config.Cfg.WorkflowEnabled = true
+	oldCreate := workflowCreateImageTask
+	t.Cleanup(func() { config.Cfg = oldConfig; workflowCreateImageTask = oldCreate })
+	seedWorkflowMember(t, "deadline-owner", true)
+	run := seedWorkflowImageRun(t, "deadline-run", "deadline-owner")
+	calls := 0
+	workflowCreateImageTask = func(ctx context.Context, request CreateImageTaskRequest) (ImageTaskView, error) {
+		calls++
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("submission has no timeout")
+		}
+		return ImageTaskView{}, errors.New("temporary failure")
+	}
+	if _, err := RunWorkflowSchedulerOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record, _, _ := repository.GetWorkflowRun(run.OwnerUID, run.ID)
+	firstID := record.Attempts[0].RequestID
+	if record.Attempts[0].Error == "" {
+		t.Fatal("transient failure was hidden")
+	}
+	database, _ := repository.DB()
+	if err := database.Model(&model.WorkflowOutputAttempt{}).Where("run_id = ?", run.ID).Updates(map[string]any{"created_at": time.Now().UTC().Add(-2 * time.Minute), "next_poll_at": time.Now().UTC().Add(-time.Second)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunWorkflowSchedulerOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record, _, _ = repository.GetWorkflowRun(run.OwnerUID, run.ID)
+	if calls != 1 || record.Run.Status != "failed" || record.Attempts[0].RequestID != firstID || !strings.Contains(record.Outputs[0].Error, "超时") {
+		t.Fatalf("calls=%d record=%#v", calls, record)
 	}
 }

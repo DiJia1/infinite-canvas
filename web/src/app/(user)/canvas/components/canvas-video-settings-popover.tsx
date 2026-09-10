@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { canvasSettingsPanelPosition } from "@/components/canvas-settings-select";
+import { CanvasSettingsSelect, canvasSettingsPanelPosition } from "@/components/canvas-settings-select";
 import { Settings2 } from "lucide-react";
 import { Button } from "antd";
 
@@ -13,12 +13,14 @@ import type { AiConfig } from "@/stores/use-config-store";
 
 type CanvasVideoSettingsPopoverProps = {
     config: AiConfig;
+    outputCount?: number;
+    onOutputCountChange?: (count: number) => void;
     onConfigChange: (key: keyof AiConfig, value: string) => void;
     buttonClassName?: string;
     placement?: "topLeft" | "top" | "topRight" | "bottomLeft" | "bottom" | "bottomRight";
 };
 
-export function CanvasVideoSettingsPopover({ config, onConfigChange, buttonClassName, placement = "topLeft" }: CanvasVideoSettingsPopoverProps) {
+export function CanvasVideoSettingsPopover({ config, onConfigChange, outputCount, onOutputCountChange, buttonClassName, placement = "topLeft" }: CanvasVideoSettingsPopoverProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
@@ -46,14 +48,25 @@ export function CanvasVideoSettingsPopover({ config, onConfigChange, buttonClass
         };
     }, [open]);
 
-    const panel = open && buttonRect ? <VideoSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} /> : null;
+    const panel =
+        open && buttonRect ? (
+            <VideoSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} outputCount={outputCount} onOutputCountChange={onOutputCountChange} />
+        ) : null;
 
     return (
         <>
             <span ref={buttonRef} className="inline-flex min-w-0">
-                <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[170px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => setOpen((current) => !current)}>
+                <Button
+                    size="small"
+                    type="text"
+                    className={buttonClassName || "!h-8 !max-w-[170px] !justify-start !rounded-full !px-2.5"}
+                    style={{ background: theme.node.fill, color: theme.node.text }}
+                    icon={<Settings2 className="size-3.5" />}
+                    onClick={() => setOpen((current) => !current)}
+                >
                     <span className="truncate">
                         {videoResolutionLabel(config.vquality)} · {videoSizeLabel(config.videoSize || "")} · {videoSecondsLabel(config.videoSeconds)}
+                        {outputCount !== undefined ? ` · ${outputCount} 个` : ""}
                     </span>
                 </Button>
             </span>
@@ -69,12 +82,16 @@ function VideoSettingsPortal({
     theme,
     config,
     onConfigChange,
+    outputCount,
+    onOutputCountChange,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
     placement: CanvasVideoSettingsPopoverProps["placement"];
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
+    outputCount?: number;
+    onOutputCountChange?: (count: number) => void;
     onConfigChange: (key: keyof AiConfig, value: string) => void;
 }) {
     const style = {
@@ -102,6 +119,19 @@ function VideoSettingsPortal({
         >
             <div style={{ maxHeight: style.maxHeight, overflowY: "auto", padding: 18, borderRadius: "inherit" }}>
                 <VideoSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" />
+                {outputCount !== undefined && onOutputCountChange ? (
+                    <div className="mt-4 space-y-2">
+                        <div className="text-xs" style={{ color: theme.node.muted }}>
+                            生成数量
+                        </div>
+                        <CanvasSettingsSelect
+                            aria-label="生成数量"
+                            value={String(outputCount)}
+                            options={Array.from({ length: 9 }, (_, index) => ({ value: String(index + 1), label: `${index + 1} 个` }))}
+                            onChange={(value) => onOutputCountChange(Number(value))}
+                        />
+                    </div>
+                ) : null}
             </div>
         </div>,
         document.body,

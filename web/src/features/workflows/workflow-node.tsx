@@ -1,9 +1,12 @@
 "use client";
 
 import { Button } from "antd";
-import { Image as ImageIcon, LoaderCircle, RefreshCw, Trash2, Upload, Video } from "lucide-react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import { Image as ImageIcon, LoaderCircle, Maximize2, Pencil, RefreshCw, Trash2, Upload, Video } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
+import { createPortal } from "react-dom";
 
+import { CanvasConnectionHandle, CanvasNodeFrame, CanvasResizeHandle, canvasNodeSelectionColor, canvasResizeCorners, type CanvasResizeCorner } from "@/components/canvas-node-primitives";
+import { CanvasNodeToolbarAction, CanvasNodeToolbarIconAction, CanvasNodeToolbarShell } from "@/components/canvas-node-toolbar-shell";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { WorkflowGenerationConfig, WorkflowNode, WorkflowOutputExecution, WorkflowOutputSlot } from "./types";
@@ -12,10 +15,43 @@ import { WorkflowMediaPreview } from "./workflow-media-preview";
 import { workflowOutputStatusText } from "./workflow-run-state";
 
 export type WorkflowPreviewInput = { key: string; sourceNodeId: string; type: "image" | "video" | "text"; text?: string; mediaId?: string; imageUrl?: string; imageStorageKey?: string; imageError?: string };
+type Viewport = { x: number; y: number; k: number };
+type ResizeStart = (event: ReactPointerEvent, node: WorkflowNode, corner: CanvasResizeCorner, slot?: WorkflowOutputSlot) => void;
 
-export function WorkflowNodeCard({ node, selected, connecting, videoVisible, inputs, imageUrl, imageStorageKey, imageError, onRetryImage, onImageLoaded, onSelect, onDragStart, onRemove, onChooseMedia, onTextChange, onConfigChange, onOutputCountChange, onPreview, onConnectTarget, onStartSource }: {
+export function WorkflowNodeCard({
+    node,
+    canvasNodeId,
+    viewport,
+    selected,
+    readOnly = false,
+    connecting,
+    videoVisible,
+    inputs,
+    imageUrl,
+    imageStorageKey,
+    imageError,
+    onRetryImage,
+    onImageLoaded,
+    onImageDimensions,
+    onDragStart,
+    onResizeStart,
+    onRemove,
+    onChooseMedia,
+    onTextChange,
+    onConfigChange,
+    onModeChange,
+    onLayoutHeightChange,
+    onOutputCountChange,
+    onPreview,
+    onPreviewMedia,
+    onConnectTarget,
+    onStartSource,
+}: {
     node: WorkflowNode;
+    canvasNodeId?: string;
+    viewport?: Viewport;
     selected: boolean;
+    readOnly?: boolean;
     connecting: boolean;
     videoVisible?: boolean;
     inputs: WorkflowPreviewInput[];
@@ -24,70 +60,194 @@ export function WorkflowNodeCard({ node, selected, connecting, videoVisible, inp
     imageError?: string;
     onRetryImage: () => void;
     onImageLoaded: (storageKey: string) => void;
-    onSelect: () => void;
+    onImageDimensions?: (dimensions: { width: number; height: number }) => void;
+    onSelect?: () => void;
     onDragStart: (event: ReactPointerEvent, node: WorkflowNode) => void;
+    onResizeStart?: ResizeStart;
     onRemove: () => void;
     onChooseMedia: () => void;
     onTextChange: (value: string) => void;
     onConfigChange: (config: WorkflowGenerationConfig) => void;
+    onModeChange?: (mode: "image" | "video") => void;
+    onLayoutHeightChange?: (height: number) => void;
     onOutputCountChange: (count: number) => void;
     onPreview: () => void;
-    onConnectTarget: () => void;
-    onStartSource: () => void;
+    onPreviewMedia?: () => void;
+    onConnectTarget: (event?: ReactPointerEvent) => void;
+    onStartSource: (event?: ReactPointerEvent) => void;
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const rootRef = useRef<HTMLDivElement>(null);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const [editing, setEditing] = useState(false);
+    const { hovered, keepHover, leaveHover } = useNodeHover();
     const width = node.width || 340;
     const height = node.height || 240;
     const generation = node.type === "image_generation" || node.type === "video_generation";
     const mediaType = node.type === "image_input" ? "image" : node.type === "video_input" ? "video" : undefined;
+    const hasMedia = Boolean(mediaType && node.mediaId);
+    useEffect(() => {
+        if (editing) textareaRef.current?.focus();
+    }, [editing]);
+    useEffect(() => {
+        if (!selected || readOnly) setEditing(false);
+    }, [selected, readOnly]);
     return (
         <div
+            ref={rootRef}
             data-workflow-object
-            data-node-id={node.id}
-            className="absolute group"
-            style={{ left: node.position.x, top: node.position.y, width, height }}
+            data-node-id={canvasNodeId || node.id}
+            data-workflow-node-id={node.id}
+            className={`node-element absolute flex select-none flex-col transition-shadow duration-200 ${selected ? "z-50" : "z-10"}`}
+            style={{ transform: `translate(${node.position.x}px, ${node.position.y}px)`, width, height, contain: "layout style" }}
             onPointerDown={(event) => onDragStart(event, node)}
-            onClick={(event) => { event.stopPropagation(); onSelect(); }}
+            onMouseEnter={keepHover}
+            onMouseLeave={leaveHover}
+            onDoubleClick={(event) => {
+                if (!readOnly && node.type === "text_input") {
+                    event.stopPropagation();
+                    setEditing(true);
+                }
+            }}
         >
-            <div className="relative h-full w-full overflow-hidden rounded-3xl border shadow-[0_14px_34px_rgba(68,64,60,.12)]" style={{ background: theme.node.panel, borderColor: selected ? theme.node.activeStroke : theme.node.stroke, color: theme.node.text }}>
-                {node.type === "text_input" ? (
-                    <><div className="absolute inset-x-0 top-0 z-10 h-6 cursor-grab" aria-hidden="true" /><textarea
-                        aria-label="流程文本输入"
-                        value={node.text || ""}
-                        placeholder="输入提示词"
-                        className="thin-scrollbar h-full w-full resize-none border-none bg-transparent px-4 pb-4 pt-7 font-mono text-sm leading-6 outline-none"
-                        onChange={(event) => onTextChange(event.target.value)}
-                        onPointerDown={(event) => event.stopPropagation()}
-                    /></>
-                ) : mediaType ? (
-                    <WorkflowMediaPreview nodeId={node.id} type={mediaType} mediaId={node.mediaId} visible={videoVisible} imageUrl={imageUrl} imageStorageKey={imageStorageKey} imageError={imageError} onRetryImage={onRetryImage} onImageLoaded={onImageLoaded} onChoose={onChooseMedia} />
-                ) : generation ? (
-                    <WorkflowConfigPanel node={node} inputs={inputs} onConfigChange={onConfigChange} onOutputCountChange={onOutputCountChange} onPreview={onPreview} />
-                ) : null}
-            </div>
-            {selected ? (
-                <div className="absolute -top-10 right-1 z-40 flex gap-1 rounded-lg border p-0.5 shadow-sm" style={{ background: theme.node.panel, borderColor: theme.node.stroke }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
-                    {mediaType ? <Button type="text" size="small" shape="circle" icon={<Upload className="size-3.5" />} onClick={onChooseMedia} aria-label="替换素材" /> : null}
-                    <Button danger type="text" size="small" shape="circle" icon={<Trash2 className="size-3.5" />} onClick={onRemove} aria-label="删除节点" />
+            <CanvasNodeFrame
+                style={{ background: hasMedia ? "transparent" : theme.node.fill, borderColor: selected ? canvasNodeSelectionColor : theme.node.stroke, boxShadow: selected ? `0 0 0 1px ${canvasNodeSelectionColor}55` : undefined, color: theme.node.text }}
+            >
+                <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-[inherit]">
+                    {node.type === "text_input" ? (
+                        editing ? (
+                            <textarea
+                                ref={textareaRef}
+                                aria-label="流程文本输入"
+                                value={node.text || ""}
+                                placeholder="输入提示词"
+                                readOnly={readOnly}
+                                className="thin-scrollbar block h-full w-full resize-none border-none bg-transparent px-4 pb-4 pt-14 font-mono text-sm leading-relaxed outline-none select-text"
+                                onChange={(event) => onTextChange(event.target.value)}
+                                onBlur={() => setEditing(false)}
+                                onKeyDown={(event) => {
+                                    if (event.key === "Escape") {
+                                        event.stopPropagation();
+                                        setEditing(false);
+                                    }
+                                }}
+                                onPointerDown={(event) => {
+                                    if (event.button !== 1) event.stopPropagation();
+                                }}
+                                onWheel={(event) => event.stopPropagation()}
+                            />
+                        ) : (
+                            <div className="thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent px-4 pb-4 pt-14 font-mono text-sm leading-relaxed">
+                                {node.text || <span style={{ color: theme.node.placeholder }}>双击编辑文字</span>}
+                            </div>
+                        )
+                    ) : mediaType ? (
+                        <WorkflowMediaPreview
+                            nodeId={node.id}
+                            readOnly={readOnly}
+                            type={mediaType}
+                            mediaId={node.mediaId}
+                            visible={videoVisible}
+                            imageUrl={imageUrl}
+                            imageStorageKey={imageStorageKey}
+                            imageError={imageError}
+                            onRetryImage={onRetryImage}
+                            onImageLoaded={onImageLoaded}
+                            onImageDimensions={onImageDimensions}
+                            onChoose={readOnly ? undefined : onChooseMedia}
+                        />
+                    ) : generation ? (
+                        <WorkflowConfigPanel
+                            node={node}
+                            readOnly={readOnly}
+                            inputs={inputs}
+                            onConfigChange={onConfigChange}
+                            onModeChange={onModeChange}
+                            onLayoutHeightChange={onLayoutHeightChange}
+                            onOutputCountChange={onOutputCountChange}
+                            onPreview={onPreview}
+                        />
+                    ) : null}
                 </div>
+                {!readOnly && onResizeStart ? canvasResizeCorners.map((corner) => <CanvasResizeHandle key={corner} corner={corner} onPointerDown={(event) => onResizeStart(event, node, corner)} />) : null}
+            </CanvasNodeFrame>
+            {!readOnly && generation ? (
+                <CanvasConnectionHandle
+                    side="left"
+                    visible={hovered || selected || connecting}
+                    label="连接到生成配置"
+                    onPointerDown={(event) => {
+                        if (event.button !== 0) return;
+                        event.stopPropagation();
+                        onConnectTarget(event);
+                    }}
+                />
+            ) : !readOnly ? (
+                <CanvasConnectionHandle
+                    side="right"
+                    visible={hovered || selected || connecting}
+                    label="开始连接"
+                    onPointerDown={(event) => {
+                        if (event.button !== 0) return;
+                        event.stopPropagation();
+                        onStartSource(event);
+                    }}
+                />
             ) : null}
-            {generation ? (
-                <button type="button" aria-label="连接到生成配置" className={`absolute left-0 top-1/2 z-30 flex size-10 -translate-x-1/2 -translate-y-1/2 items-center justify-center ${connecting ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onConnectTarget(); }}>
-                    <span className="size-3 rounded-full border-2" style={{ background: theme.node.panel, borderColor: theme.node.muted }} />
-                </button>
-            ) : (
-                <button type="button" aria-label="开始连接" className="absolute right-0 top-1/2 z-30 flex size-10 translate-x-1/2 -translate-y-1/2 items-center justify-center opacity-0 group-hover:opacity-100" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onStartSource(); }}>
-                    <span className="size-3 rounded-full border-2" style={{ background: theme.node.panel, borderColor: theme.node.muted }} />
-                </button>
-            )}
+            {hovered && !editing && (!readOnly || (hasMedia && onPreviewMedia)) ? (
+                <WorkflowNodeToolbar anchor={rootRef} viewport={viewport} positionKey={`${node.position.x}:${node.position.y}:${width}:${height}`} onMouseEnter={keepHover} onMouseLeave={leaveHover}>
+                    {!readOnly && node.type === "text_input" ? <CanvasNodeToolbarAction title="编辑文本" label="编辑文字" icon={<Pencil className="size-4" />} onClick={() => setEditing(true)} /> : null}
+                    {!readOnly && mediaType ? (
+                        <CanvasNodeToolbarAction
+                            title={mediaType === "image" ? "替换图片" : "替换视频"}
+                            label={mediaType === "image" ? "替换图片" : "替换视频"}
+                            icon={mediaType === "image" ? <Upload className="size-4" /> : <Video className="size-4" />}
+                            onClick={onChooseMedia}
+                        />
+                    ) : null}
+                    {hasMedia && onPreviewMedia ? (
+                        <CanvasNodeToolbarAction title={mediaType === "image" ? "查看图片详情" : "查看视频"} label={mediaType === "image" ? "查看大图" : "查看视频"} icon={<Maximize2 className="size-4" />} onClick={onPreviewMedia} />
+                    ) : null}
+                    {!readOnly ? <CanvasNodeToolbarIconAction title="删除节点" icon={<Trash2 className="size-4" />} onClick={onRemove} /> : null}
+                </WorkflowNodeToolbar>
+            ) : null}
         </div>
     );
 }
 
-export function WorkflowOutputCard({ parent, slot, selected, execution, resourceNodeId, videoVisible, imageUrl, imageStorageKey, imageError, retrying, confirmingRetry, onReloadMedia, onRetryOutput, onImageLoaded, onSelect, onDragStart, onRemove, onStartSource }: {
+export function WorkflowOutputCard({
+    parent,
+    slot,
+    canvasNodeId,
+    viewport,
+    selected,
+    readOnly = false,
+    connecting = false,
+    execution,
+    resourceNodeId,
+    videoVisible,
+    imageUrl,
+    imageStorageKey,
+    imageError,
+    retrying,
+    confirmingRetry,
+    onReloadMedia,
+    onRetryOutput,
+    onImageLoaded,
+    onImageDimensions,
+    onDragStart,
+    onResizeStart,
+    onRemove,
+    onPreviewMedia,
+    onStartSource,
+}: {
     parent: WorkflowNode;
     slot: WorkflowOutputSlot;
+    canvasNodeId?: string;
+    viewport?: Viewport;
     selected: boolean;
+    readOnly?: boolean;
+    connecting?: boolean;
     execution?: WorkflowOutputExecution;
     resourceNodeId?: string;
     videoVisible?: boolean;
@@ -99,31 +259,166 @@ export function WorkflowOutputCard({ parent, slot, selected, execution, resource
     onReloadMedia?: () => void;
     onRetryOutput?: () => void;
     onImageLoaded?: (storageKey: string) => void;
-    onSelect: () => void;
+    onImageDimensions?: (dimensions: { width: number; height: number }) => void;
+    onSelect?: () => void;
     onDragStart: (event: ReactPointerEvent, parent: WorkflowNode, slot: WorkflowOutputSlot) => void;
+    onResizeStart?: ResizeStart;
     onRemove: () => void;
-    onStartSource: () => void;
+    onPreviewMedia?: () => void;
+    onStartSource: (event?: ReactPointerEvent) => void;
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const rootRef = useRef<HTMLDivElement>(null);
+    const { hovered, keepHover, leaveHover } = useNodeHover();
     const position = slot.position || { x: parent.position.x + (parent.width || 360) + 96, y: parent.position.y };
+    const width = slot.width || (slot.type === "image" ? 340 : 420);
+    const height = slot.height || (slot.type === "image" ? 240 : 236);
+    const hasMedia = execution?.status === "succeeded" && execution.mediaId && resourceNodeId;
     return (
-        <div data-workflow-object className="group absolute" style={{ left: position.x, top: position.y, width: slot.width || (slot.type === "image" ? 340 : 420), height: slot.height || (slot.type === "image" ? 240 : 236) }} onPointerDown={(event) => onDragStart(event, parent, slot)} onClick={(event) => { event.stopPropagation(); onSelect(); }}>
-            <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-3xl border shadow-[0_14px_34px_rgba(68,64,60,.12)]" style={{ background: theme.node.panel, borderColor: selected ? theme.node.activeStroke : theme.node.stroke, color: theme.node.placeholder }}>
-                {execution?.status === "succeeded" && execution.mediaId && resourceNodeId ? (
-                    <WorkflowMediaPreview nodeId={resourceNodeId} type={slot.type} mediaId={execution.mediaId} visible={videoVisible} imageUrl={imageUrl} imageStorageKey={imageStorageKey} imageError={imageError} onRetryImage={onReloadMedia} onImageLoaded={onImageLoaded} />
-                ) : (
-                    <div className={`flex max-w-[85%] flex-col items-center gap-2 text-center text-xs ${execution?.status === "failed" || execution?.status === "blocked" ? "text-red-500" : "opacity-55"}`}>
-                        {execution && ["ready", "claimed", "submitting", "running"].includes(execution.status) ? <LoaderCircle className="size-6 animate-spin" /> : slot.type === "image" ? <ImageIcon className="size-7" /> : <Video className="size-7" />}
-                        <span>{workflowOutputStatusText(execution?.status)}</span>
-                        {execution?.error ? <span className="line-clamp-3 opacity-80">{execution.error}</span> : null}
-                    </div>
-                )}
-                {slot.type === "image" && execution?.status === "failed" && onRetryOutput ? <Button type="text" size="small" loading={retrying} icon={<RefreshCw className="size-3.5" />} className="!absolute !bottom-2 !right-2" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRetryOutput(); }}>{confirmingRetry ? "确认重试" : "重试"}</Button> : null}
-                {selected ? <Button danger type="text" size="small" shape="circle" icon={<Trash2 className="size-3.5" />} className="!absolute !right-2 !top-2" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemove(); }} aria-label="删除输出" /> : null}
-            </div>
-            <button type="button" aria-label="从输出开始连接" className="absolute right-0 top-1/2 z-30 flex size-10 translate-x-1/2 -translate-y-1/2 items-center justify-center opacity-0 group-hover:opacity-100" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onStartSource(); }}>
-                <span className="size-3 rounded-full border-2" style={{ background: theme.node.panel, borderColor: theme.node.muted }} />
-            </button>
+        <div
+            ref={rootRef}
+            data-workflow-object
+            data-node-id={canvasNodeId}
+            data-workflow-node-id={parent.id}
+            data-workflow-slot-id={slot.id}
+            className={`node-element absolute flex select-none flex-col transition-shadow duration-200 ${selected ? "z-50" : "z-10"}`}
+            style={{ transform: `translate(${position.x}px, ${position.y}px)`, width, height, contain: "layout style" }}
+            onPointerDown={(event) => onDragStart(event, parent, slot)}
+            onMouseEnter={keepHover}
+            onMouseLeave={leaveHover}
+        >
+            <CanvasNodeFrame
+                style={{
+                    background: hasMedia ? "transparent" : theme.node.fill,
+                    borderColor: selected ? canvasNodeSelectionColor : theme.node.stroke,
+                    boxShadow: selected ? `0 0 0 1px ${canvasNodeSelectionColor}55` : undefined,
+                    color: theme.node.placeholder,
+                }}
+            >
+                <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-[inherit]">
+                    {hasMedia ? (
+                        <WorkflowMediaPreview
+                            nodeId={resourceNodeId!}
+                            type={slot.type}
+                            mediaId={execution!.mediaId}
+                            visible={videoVisible}
+                            imageUrl={imageUrl}
+                            imageStorageKey={imageStorageKey}
+                            imageError={imageError}
+                            onRetryImage={onReloadMedia}
+                            onImageLoaded={onImageLoaded}
+                            onImageDimensions={onImageDimensions}
+                        />
+                    ) : (
+                        <div className={`flex max-w-[85%] flex-col items-center gap-2 text-center text-xs ${execution?.status === "failed" || execution?.status === "blocked" ? "text-red-500" : "opacity-55"}`}>
+                            {execution && ["ready", "claimed", "submitting", "running"].includes(execution.status) ? (
+                                <LoaderCircle className="size-6 animate-spin" />
+                            ) : slot.type === "image" ? (
+                                <ImageIcon className="size-7" />
+                            ) : (
+                                <Video className="size-7" />
+                            )}
+                            <span>{workflowOutputStatusText(execution?.status)}</span>
+                            {execution?.error ? <span className="line-clamp-3 opacity-80">{execution.error}</span> : null}
+                        </div>
+                    )}
+                    {!readOnly && slot.type === "image" && execution?.status === "failed" && onRetryOutput ? (
+                        <Button
+                            type="text"
+                            size="small"
+                            loading={retrying}
+                            icon={<RefreshCw className="size-3.5" />}
+                            className="!absolute !bottom-2 !right-2"
+                            onPointerDown={(event) => {
+                                if (event.button !== 1) event.stopPropagation();
+                            }}
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                onRetryOutput();
+                            }}
+                        >
+                            {confirmingRetry ? "确认重试" : "重试"}
+                        </Button>
+                    ) : null}
+                </div>
+                {!readOnly && onResizeStart ? canvasResizeCorners.map((corner) => <CanvasResizeHandle key={corner} corner={corner} onPointerDown={(event) => onResizeStart(event, parent, corner, slot)} />) : null}
+            </CanvasNodeFrame>
+            {!readOnly ? (
+                <CanvasConnectionHandle
+                    side="right"
+                    visible={hovered || selected || connecting}
+                    label="从输出开始连接"
+                    onPointerDown={(event) => {
+                        if (event.button !== 0) return;
+                        event.stopPropagation();
+                        onStartSource(event);
+                    }}
+                />
+            ) : null}
+            {hovered && (!readOnly || (hasMedia && onPreviewMedia)) ? (
+                <WorkflowNodeToolbar anchor={rootRef} viewport={viewport} positionKey={`${position.x}:${position.y}:${width}:${height}`} onMouseEnter={keepHover} onMouseLeave={leaveHover}>
+                    {hasMedia && onPreviewMedia ? (
+                        <CanvasNodeToolbarAction title={slot.type === "image" ? "查看图片详情" : "查看视频"} label={slot.type === "image" ? "查看大图" : "查看视频"} icon={<Maximize2 className="size-4" />} onClick={onPreviewMedia} />
+                    ) : null}
+                    {!readOnly ? <CanvasNodeToolbarIconAction title="删除输出" icon={<Trash2 className="size-4" />} onClick={onRemove} /> : null}
+                </WorkflowNodeToolbar>
+            ) : null}
         </div>
     );
+}
+
+function useNodeHover() {
+    const [hovered, setHovered] = useState(false);
+    const timeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+    useEffect(() => () => clearTimeout(timeout.current), []);
+    return {
+        hovered,
+        keepHover: () => {
+            clearTimeout(timeout.current);
+            setHovered(true);
+        },
+        leaveHover: () => {
+            clearTimeout(timeout.current);
+            timeout.current = setTimeout(() => setHovered(false), 100);
+        },
+    };
+}
+
+function WorkflowNodeToolbar({
+    anchor,
+    viewport,
+    positionKey,
+    children,
+    onMouseEnter,
+    onMouseLeave,
+}: {
+    anchor: RefObject<HTMLDivElement | null>;
+    viewport?: Viewport;
+    positionKey: string;
+    children: ReactNode;
+    onMouseEnter: () => void;
+    onMouseLeave: () => void;
+}) {
+    const [position, setPosition] = useState<{ left: number; top: number }>();
+    useLayoutEffect(() => {
+        const update = () => {
+            const rect = anchor.current?.getBoundingClientRect();
+            if (rect) setPosition({ left: rect.left + rect.width / 2, top: rect.top - 14 });
+        };
+        update();
+        window.addEventListener("resize", update);
+        window.addEventListener("scroll", update, true);
+        return () => {
+            window.removeEventListener("resize", update);
+            window.removeEventListener("scroll", update, true);
+        };
+    }, [anchor, viewport?.x, viewport?.y, viewport?.k, positionKey]);
+    return position
+        ? createPortal(
+              <CanvasNodeToolbarShell className="fixed" style={position} onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave}>
+                  {children}
+              </CanvasNodeToolbarShell>,
+              document.body,
+          )
+        : null;
 }

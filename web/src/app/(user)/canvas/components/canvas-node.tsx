@@ -1,5 +1,6 @@
 "use client";
 
+import { resizeCanvasNode } from "@/lib/canvas-resize";
 import { CanvasVideoContent } from "./canvas-video-content";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -14,8 +15,7 @@ import { CanvasImageMaskOverlay } from "../image-mask/canvas-image-mask-overlay"
 import type { CanvasRenderDetail } from "../media/canvas-media-policy";
 import { useCanvasPerfRender } from "../utils/canvas-performance-debug";
 
-type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
-const selectionBlue = "#2f80ff";
+import { CanvasNodeFrame, CanvasResizeHandle as ResizeHandle, CanvasConnectionHandle as ConnectionHandleDot, canvasNodeSelectionColor as selectionBlue, type CanvasResizeCorner as ResizeCorner } from "@/components/canvas-node-primitives";
 
 type CanvasNodeProps = {
     data: CanvasNodeData;
@@ -211,41 +211,8 @@ export const CanvasNode = React.memo(function CanvasNode({
             const scale = getScale();
             const dx = (event.clientX - resizeRef.current.startX) / scale;
             const dy = (event.clientY - resizeRef.current.startY) / scale;
-            const minWidth = 220;
-            const minHeight = 160;
-            const startRight = resizeRef.current.startLeft + resizeRef.current.startWidth;
-            const startBottom = resizeRef.current.startTop + resizeRef.current.startHeight;
-            const fromLeft = resizeRef.current.corner.includes("left");
-            const fromTop = resizeRef.current.corner.includes("top");
-            const rawWidth = Math.max(minWidth, resizeRef.current.startWidth + (fromLeft ? -dx : dx));
-            const rawHeight = Math.max(minHeight, resizeRef.current.startHeight + (fromTop ? -dy : dy));
-            let width = rawWidth;
-            let height = rawHeight;
-            if (resizeRef.current.keepRatio) {
-                const ratio = resizeRef.current.ratio;
-                if (Math.abs(dx) >= Math.abs(dy)) {
-                    height = width / ratio;
-                } else {
-                    width = height * ratio;
-                }
-                if (height < minHeight) {
-                    height = minHeight;
-                    width = height * ratio;
-                }
-                if (width < minWidth) {
-                    width = minWidth;
-                    height = width / ratio;
-                }
-            }
-
-            pendingResizeRef.current = {
-                width,
-                height,
-                position: {
-                    x: fromLeft ? startRight - width : resizeRef.current.startLeft,
-                    y: fromTop ? startBottom - height : resizeRef.current.startTop,
-                },
-            };
+            const start = resizeRef.current;
+            pendingResizeRef.current = resizeCanvasNode({ x: start.startLeft, y: start.startTop, width: start.startWidth, height: start.startHeight, corner: start.corner, keepRatio: start.keepRatio, ratio: start.ratio }, { x: dx, y: dy });
             if (resizeFrameRef.current) return;
             resizeFrameRef.current = requestAnimationFrame(flushPendingResize);
         },
@@ -351,8 +318,7 @@ export const CanvasNode = React.memo(function CanvasNode({
             }}
             onContextMenu={(event) => onContextMenu(event, data.id)}
         >
-            <div
-                className="relative h-full w-full overflow-visible rounded-3xl border-2"
+            <CanvasNodeFrame
                 style={{
                     background: hasImageContent || hasVideoContent ? "transparent" : theme.node.fill,
                     borderColor: hasImageContent ? imageBorderColor : isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.stroke,
@@ -419,7 +385,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 <ResizeHandle corner="top-right" onMouseDown={handleResizeMouseDown} />
                 <ResizeHandle corner="bottom-left" onMouseDown={handleResizeMouseDown} />
                 <ResizeHandle corner="bottom-right" onMouseDown={handleResizeMouseDown} />
-            </div>
+            </CanvasNodeFrame>
 
             <ConnectionHandleDot side="left" visible={hovered || isSelected || isConnecting} onMouseDown={(event) => onConnectStart(event, data.id, "target")} />
             <ConnectionHandleDot side="right" visible={data.type !== CanvasNodeType.Config && (hovered || isSelected || isConnecting)} onMouseDown={(event) => onConnectStart(event, data.id, "source")} />
@@ -801,31 +767,6 @@ function BatchFrame({ batchCount, batchExpanded, batchOpening, batchRecovering, 
                 </div>
             ) : null}
             {children}
-        </div>
-    );
-}
-function ResizeHandle({ corner, onMouseDown }: { corner: ResizeCorner; onMouseDown: (event: React.MouseEvent, corner: ResizeCorner) => void }) {
-    const positionClass = {
-        "top-left": "-left-[14px] -top-[14px] cursor-nwse-resize",
-        "top-right": "-right-[14px] -top-[14px] cursor-nesw-resize",
-        "bottom-left": "-bottom-[14px] -left-[14px] cursor-nesw-resize",
-        "bottom-right": "-bottom-[14px] -right-[14px] cursor-nwse-resize",
-    }[corner];
-
-    return <div className={`absolute z-50 size-7 ${positionClass}`} onMouseDown={(event) => onMouseDown(event, corner)} />;
-}
-
-function ConnectionHandleDot({ side, visible, onMouseDown }: { side: "left" | "right"; visible: boolean; onMouseDown: (event: React.MouseEvent) => void }) {
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
-
-    return (
-        <div
-            className={`absolute top-1/2 z-30 flex size-12 -translate-y-1/2 cursor-crosshair items-center justify-center transition-opacity duration-150 ${
-                side === "left" ? "-left-6" : "-right-6"
-            } ${visible ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"}`}
-            onMouseDown={onMouseDown}
-        >
-            <div className="size-3 rounded-full border-2 transition-all hover:scale-125" style={{ background: theme.node.panel, borderColor: theme.node.muted }} />
         </div>
     );
 }

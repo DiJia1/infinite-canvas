@@ -2,6 +2,7 @@
 
 import { Button, Tag } from "antd";
 import { Check, CloudOff, LoaderCircle, RefreshCw, TriangleAlert } from "lucide-react";
+import { EditorSyncStatus } from "@/components/editor-sync-status";
 import { useState } from "react";
 
 import { useCanvasStore, type CanvasBootstrapStatus, type CanvasProjectSync } from "../stores/use-canvas-store";
@@ -89,8 +90,6 @@ export function CanvasSyncFeedback({ projectId, pendingDocument = false }: { pro
 
     if (!syncEnabled || !sync) return null;
     const description = describeCanvasSync(sync, blocked, pendingDocument);
-    const appearance = syncAppearance[description.kind];
-
     const refresh = async () => {
         setRefreshing(true);
         try {
@@ -102,27 +101,11 @@ export function CanvasSyncFeedback({ projectId, pendingDocument = false }: { pro
         }
     };
 
-    return (
-        <span className="inline-flex min-w-0 items-center gap-1" onClick={(event) => event.stopPropagation()}>
-            {description.presentation === "icon" ? (
-                <span
-                    aria-label={description.label}
-                    className={`inline-flex size-4 items-center justify-center ${description.kind === "saved" ? "text-emerald-500 dark:text-emerald-400" : "text-sky-500 dark:text-sky-400"}`}
-                    role="status"
-                    title={description.label}
-                >
-                    {appearance.icon}
-                </span>
-            ) : (
-                <Tag bordered={false} color={appearance.color} icon={appearance.icon} className="m-0 inline-flex items-center text-xs">
-                    {description.label}
-                </Tag>
-            )}
-            {description.refreshable ? (
-                <Button type="link" size="small" loading={refreshing} icon={<RefreshCw className="size-3" />} className="h-6 px-1 text-xs" onClick={() => void refresh()}>
-                    加载服务器版本
-                </Button>
-            ) : null}
-        </span>
-    );
+    return <EditorSyncStatus kind={description.kind} label={description.label}>
+        {description.refreshable ? (
+            <Button type="link" size="small" loading={refreshing} icon={<RefreshCw className="size-3" />} className="h-6 px-1 text-xs" onClick={() => void refresh()}>
+                加载服务器版本
+            </Button>
+        ) : null}
+    </EditorSyncStatus>;
 }

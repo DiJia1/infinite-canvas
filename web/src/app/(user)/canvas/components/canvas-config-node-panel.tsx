@@ -1,6 +1,5 @@
 "use client";
 
-import type { CSSProperties } from "react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Edit3, Eye, Image as ImageIcon, Play, Video } from "lucide-react";
 import { App, Button, Empty, Input, Modal, Segmented } from "antd";
@@ -9,7 +8,8 @@ import { resolveImageUrl } from "@/services/image-storage";
 import type { CanvasImageResource } from "../media/canvas-image-resource-controller";
 
 import { defaultConfig, reconcileProviderConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { CanvasSettingsSelect } from "@/components/canvas-settings-select";
+import { CanvasConfigModelSelect } from "@/components/canvas-config-model-select";
+import { CanvasInputChip as InputChip } from "@/components/canvas-node-primitives";
 import { reconcileVideoConfig } from "@/lib/video-config";
 import { resolveSelectedModel } from "@/lib/model-selection";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -269,21 +269,6 @@ export function CanvasConfigNodePanel({ node, inputSummary, inputs, onConfigChan
     );
 }
 
-function CanvasConfigModelSelect({ value, options, onChange }: { value: string | undefined; options: Array<{ id: string; name: string }> | undefined; onChange: (value: string) => void }) {
-    if (!options?.length) return null;
-    return (
-        <div className="min-w-0 w-full" data-canvas-no-zoom onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-            <CanvasSettingsSelect
-                className="!min-w-0 !w-full"
-                size="small"
-                value={value}
-                options={options.map((item) => ({ value: item.id, label: item.name }))}
-                onChange={onChange}
-            />
-        </div>
-    );
-}
-
 function PreviewSection({ title, count, empty, children }: { title: string; count: number; empty: string; children: React.ReactNode }) {
     return (
         <section>
@@ -413,15 +398,6 @@ function HorizontalOrderButtons({ index, total, onMove }: { index: number; total
         <div className="absolute inset-x-1 bottom-1 flex justify-between">
             <Button size="small" className="!h-6 !w-6 !min-w-6 !rounded-full !bg-white/85 !p-0 !shadow-sm" icon={<ArrowLeft className="size-3" />} disabled={index <= 0} onClick={() => onMove(-1)} />
             <Button size="small" className="!h-6 !w-6 !min-w-6 !rounded-full !bg-white/85 !p-0 !shadow-sm" icon={<ArrowRight className="size-3" />} disabled={index >= total - 1} onClick={() => onMove(1)} />
-        </div>
-    );
-}
-
-function InputChip({ label, value, style }: { label: string; value: string; style: CSSProperties }) {
-    return (
-        <div className="inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[11px]" style={style}>
-            <span>{label}</span>
-            <span className="font-medium">{value}</span>
         </div>
     );
 }

@@ -103,6 +103,10 @@ func DeleteWorkflowRun(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func writeWorkflowRunError(w http.ResponseWriter, err error) {
+	if errors.Is(err, service.ErrWorkflowConflict) {
+		writeWorkflowError(w, err)
+		return
+	}
 	if service.IsWorkflowValidationError(err) {
 		FailStatus(w, http.StatusBadRequest, err.Error())
 		return

@@ -14,6 +14,7 @@ import (
 
 type CreateWorkflowRunInput struct {
 	RequestID string `json:"requestId"`
+	Revision  *int   `json:"revision,omitempty"`
 }
 
 type RetryWorkflowOutputInput struct {
@@ -63,6 +64,14 @@ func CreateWorkflowRun(ctx context.Context, user PortalUser, workflowID string, 
 	workflow, err := GetWorkflow(ctx, user, workflowID)
 	if err != nil {
 		return WorkflowRunDetail{}, err
+	}
+	if input.Revision != nil {
+		if *input.Revision < 1 {
+			return WorkflowRunDetail{}, workflowValidationError{message: "流程版本无效"}
+		}
+		if *input.Revision != workflow.Revision {
+			return WorkflowRunDetail{}, ErrWorkflowConflict
+		}
 	}
 	graph, err := normalizeAndSizeWorkflowGraph(workflow.Graph)
 	if err != nil {

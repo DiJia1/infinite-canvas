@@ -8,6 +8,8 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
 
 export function CanvasToolbar({
+    homeLabel,
+    onHome,
     selectedCount,
     canUndo,
     canRedo,
@@ -26,6 +28,8 @@ export function CanvasToolbar({
     onBackgroundModeChange,
     onShowImageInfoChange,
 }: {
+    homeLabel: string;
+    onHome: () => void;
     selectedCount: number;
     canUndo: boolean;
     canRedo: boolean;
@@ -42,7 +46,7 @@ export function CanvasToolbar({
     onClear: () => void;
     onDeselect: () => void;
     onBackgroundModeChange: (mode: CanvasBackgroundMode) => void;
-    onShowImageInfoChange: (show: boolean) => void;
+    onShowImageInfoChange?: (show: boolean) => void;
 }) {
     const wrapRef = useRef<HTMLDivElement>(null);
     const colorTheme = useThemeStore((state) => state.theme);
@@ -55,13 +59,13 @@ export function CanvasToolbar({
     const dockStyle = { background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item, boxShadow: colorTheme === "dark" ? "0 18px 45px rgba(0,0,0,.32)" : "0 16px 40px rgba(28,25,23,.12)" };
     const hoverStyle = { background: theme.toolbar.itemHover, color: theme.toolbar.activeText };
     const activeStyle = { background: theme.toolbar.activeBg, color: theme.toolbar.activeText };
-    const tip = hovered ? toolLabel(hovered) : "";
+    const tip = hovered === "tool-home" ? homeLabel : hovered ? toolLabel(hovered) : "";
 
     return (
         <div className="pointer-events-none absolute bottom-5 z-50 flex justify-center" style={{ left: 300, right: 16 }}>
             {tip ? <DockTip label={tip} x={tipX} theme={theme} /> : null}
             <div ref={wrapRef} className="thin-scrollbar pointer-events-auto flex h-14 max-w-full items-center gap-1 overflow-x-auto rounded-xl border px-2 shadow-lg backdrop-blur [&>*]:shrink-0" style={dockStyle}>
-				<ToolbarButton id="tool-workbench" label="返回工作台" hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={() => window.location.assign("/")}>
+				<ToolbarButton id="tool-home" label={homeLabel} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onHome}>
 					<Home className="size-4.5" />
 				</ToolbarButton>
 				<Divider theme={theme} />
@@ -171,13 +175,13 @@ export function CanvasToolbar({
                             },
                         ]}
                     />
-                    <div className="mt-3 flex items-center justify-between gap-3 rounded-lg px-1.5 py-1">
+                    {onShowImageInfoChange ? <div className="mt-3 flex items-center justify-between gap-3 rounded-lg px-1.5 py-1">
                         <span className="inline-flex min-w-0 items-center gap-1.5 text-[11px] font-medium opacity-65">
                             <Info className="size-3.5" />
                             图片信息
                         </span>
                         <Switch size="small" checked={showImageInfo} onChange={onShowImageInfoChange} />
-                    </div>
+                    </div> : null}
                 </div>
             ) : null}
         </div>

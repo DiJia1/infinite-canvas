@@ -1,5 +1,9 @@
 "use client";
 
+import { CanvasEditorTopBar } from "@/components/canvas-editor-top-bar";
+import { useEditorNavigation } from "@/components/layout/editor-navigation";
+import { useNavigationRoute } from "@/components/layout/use-navigation-route";
+
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent } from "react";
 import { useParams, useRouter } from "next/navigation";
@@ -241,6 +245,8 @@ function InfiniteCanvasPage() {
     const { message } = App.useApp();
     const params = useParams<{ id: string }>();
     const router = useRouter();
+    const editorNavigation = useEditorNavigation();
+    const { home } = useNavigationRoute();
     const projectId = params.id;
     const videoSessionRef = useRef(0);
     const videoProjectRef = useRef(projectId);
@@ -614,6 +620,13 @@ function InfiniteCanvasPage() {
         selectedNodeIdsRef.current = selectedNodeIds;
         viewportRef.current = viewport;
     }, [nodes, connections, maskResources, selectedNodeIds, viewport]);
+
+    const navigateAway = useCallback((href: string) => {
+        flushDocument(getLiveViewport());
+        router.push(href);
+    }, [flushDocument, getLiveViewport, router]);
+    useEffect(() => editorNavigation?.register(navigateAway), [editorNavigation, navigateAway]);
+    const returnHome = () => navigateAway(home.href);
 
     useEffect(() => {
         const el = containerRef.current;
@@ -2116,7 +2129,7 @@ function InfiniteCanvasPage() {
                     onCancelTitleEditing={() => setTitleEditing(false)}
                     canUndo={canUndo}
                     canRedo={canRedo}
-                    onProjects={() => { flushDocument(getLiveViewport()); router.push(appPath("/canvas")); }}
+                    onProjects={returnHome}
                     onCreateProject={isProjectReadonly ? () => undefined : createAndOpenProject}
                     onDeleteProject={isProjectReadonly ? () => undefined : deleteCurrentProject}
                     onImportImage={isProjectReadonly ? () => undefined : () => handleUploadRequest()}
@@ -2267,6 +2280,8 @@ function InfiniteCanvasPage() {
                 ) : null}
 
                 <CanvasToolbar
+                    homeLabel={home.label}
+                    onHome={returnHome}
                     selectedCount={selectedNodeIds.size}
                     canUndo={canUndo}
                     canRedo={canRedo}
@@ -2402,27 +2417,12 @@ function CanvasTopBar({
     onUndo: () => void;
     onRedo: () => void;
 }) {
-    const colorTheme = useThemeStore((state) => state.theme);
-    const theme = canvasThemes[colorTheme];
-    const titleRef = useRef<HTMLDivElement>(null);
-
-    useEffect(() => {
-        if (!isTitleEditing) return;
-        const close = (event: PointerEvent) => {
-            if (!titleRef.current?.contains(event.target as Node)) onFinishTitleEditing();
-        };
-        document.addEventListener("pointerdown", close, true);
-        return () => document.removeEventListener("pointerdown", close, true);
-    }, [isTitleEditing, onFinishTitleEditing]);
-
-    return (
-        <>
-            <div className="pointer-events-none absolute left-0 right-0 top-0 z-50 flex h-16 items-center justify-between px-4">
-                <div className="pointer-events-auto flex min-w-0 items-center gap-3">
-                    <Dropdown
-                        trigger={["click"]}
-                        menu={{
-                            items: [
+    return <CanvasEditorTopBar
+        title={title} titleDraft={titleDraft} editing={isTitleEditing}
+        onDraftChange={onTitleDraftChange} onStartEditing={onStartTitleEditing}
+        onFinishEditing={onFinishTitleEditing} onCancelEditing={onCancelTitleEditing}
+        status={<><CanvasBootstrapFeedback /><CanvasSyncFeedback projectId={projectId} pendingDocument={pendingDocument} /></>}
+        menu={{ items: [
                                 { key: "projects", icon: <Images className="size-4" />, label: "我的画布", onClick: onProjects },
                                 { type: "divider" },
                                 { key: "new", icon: <Plus className="size-4" />, label: "新建画布", onClick: onCreateProject },
@@ -2432,45 +2432,8 @@ function CanvasTopBar({
                                 { type: "divider" },
                                 { key: "undo", disabled: !canUndo, icon: <Undo2 className="size-4" />, label: <MenuLabel text="撤销" shortcut="⌘ Z" />, onClick: onUndo },
                                 { key: "redo", disabled: !canRedo, icon: <Redo2 className="size-4" />, label: <MenuLabel text="重做" shortcut="⌘ ⇧ Z / ⌘ Y" />, onClick: onRedo },
-                            ],
-                        }}
-                    >
-                        <button type="button" className="grid size-9 place-items-center rounded-full transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} aria-label="打开画布菜单">
-                            <Menu className="size-5" />
-                        </button>
-                    </Dropdown>
-
-                    <div ref={titleRef} className="flex min-w-0 items-center gap-2">
-                        {isTitleEditing ? (
-                            <input
-                                autoFocus
-                                value={titleDraft}
-                                onChange={(event) => onTitleDraftChange(event.target.value)}
-                                onBlur={onFinishTitleEditing}
-                                onKeyDown={(event) => {
-                                    if (event.key === "Enter") onFinishTitleEditing();
-                                    if (event.key === "Escape") onCancelTitleEditing();
-                                }}
-                                className="max-w-[280px] bg-transparent p-0 text-left text-lg font-semibold tracking-normal outline-none"
-                                style={{ color: theme.node.text }}
-                            />
-                        ) : (
-                            <button
-                                type="button"
-                                className="max-w-[280px] truncate border-b border-dashed border-transparent text-left text-lg font-semibold tracking-normal transition hover:border-current"
-                                onDoubleClick={onStartTitleEditing}
-                                title="双击修改画布名称"
-                            >
-                                {title}
-                            </button>
-                        )}
-                        <CanvasBootstrapFeedback />
-                        <CanvasSyncFeedback projectId={projectId} pendingDocument={pendingDocument} />
-                    </div>
-                </div>
-            </div>
-        </>
-    );
+                            ], }}
+    />;
 }
 
 function MenuLabel({ text, shortcut }: { text: string; shortcut: string }) {

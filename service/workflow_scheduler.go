@@ -17,8 +17,11 @@ import (
 )
 
 const (
-	workflowAttemptLease = 30 * time.Second
-	workflowPollDelay    = time.Second
+	workflowAttemptLease         = 30 * time.Second
+	workflowPollDelay            = time.Second
+	workflowCreateRetryWindow    = time.Minute
+	workflowCreateRequestTimeout = 20 * time.Second
+	workflowCreateRetryDelay     = 10 * time.Second
 )
 
 var (
@@ -315,6 +318,9 @@ func processWorkflowAttempt(ctx context.Context, attempt model.WorkflowOutputAtt
 			}
 			return applyWorkflowImageView(attempt, view)
 		}
+		if attempt.Error != "" && workflowTaskCreationExpired(attempt, time.Now().UTC()) {
+			return failWorkflowAttempt(attempt, safeMessageError{message: "创建生成任务超时，尚未提交供应商；请检查参考素材或网络后重试"})
+		}
 		if err := requireEnabledWorkflowMember(attempt.OwnerUID); err != nil {
 			return failWorkflowAttempt(attempt, err)
 		}
@@ -329,7 +335,9 @@ func processWorkflowAttempt(ctx context.Context, attempt model.WorkflowOutputAtt
 		if err != nil {
 			return failWorkflowAttempt(attempt, err)
 		}
-		view, err = workflowCreateImageTask(userContext, request)
+		submitContext, cancel := context.WithTimeout(userContext, workflowCreateRequestTimeout)
+		view, err = workflowCreateImageTask(submitContext, request)
+		cancel()
 		if err != nil {
 			if existing, found, lookupErr := repository.GetImageGenerationTaskByClientRequest(attempt.OwnerUID, attempt.RequestID); lookupErr != nil {
 				return deferWorkflowAttempt(attempt)
@@ -338,10 +346,11 @@ func processWorkflowAttempt(ctx context.Context, attempt model.WorkflowOutputAtt
 				logWorkflowAttempt(attempt, "recovered")
 				return deferWorkflowAttempt(attempt)
 			}
-			if _, safe := err.(interface{ SafeMessage() string }); !safe {
-				return deferWorkflowAttempt(attempt)
+			var safe interface{ SafeMessage() string }
+			if errors.As(err, &safe) {
+				return failWorkflowAttempt(attempt, err)
 			}
-			return failWorkflowAttempt(attempt, err)
+			return retryWorkflowTaskCreation(attempt, err)
 		}
 		attempt.TaskID, attempt.TaskType = view.ID, "image"
 		logWorkflowAttempt(attempt, "submitted")
@@ -374,6 +383,9 @@ func processWorkflowVideoAttempt(ctx context.Context, attempt model.WorkflowOutp
 			}
 			return applyWorkflowVideoView(attempt, view)
 		}
+		if attempt.Error != "" && workflowTaskCreationExpired(attempt, time.Now().UTC()) {
+			return failWorkflowAttempt(attempt, safeMessageError{message: "创建生成任务超时，尚未提交供应商；请检查参考素材或网络后重试"})
+		}
 		if err := requireEnabledWorkflowMember(attempt.OwnerUID); err != nil {
 			return failWorkflowAttempt(attempt, err)
 		}
@@ -388,7 +400,9 @@ func processWorkflowVideoAttempt(ctx context.Context, attempt model.WorkflowOutp
 		if err != nil {
 			return failWorkflowAttempt(attempt, err)
 		}
-		view, err = workflowCreateVideoTask(userContext, request)
+		submitContext, cancel := context.WithTimeout(userContext, workflowCreateRequestTimeout)
+		view, err = workflowCreateVideoTask(submitContext, request)
+		cancel()
 		if err != nil {
 			if existing, found, lookupErr := repository.GetVideoGenerationTaskByClient(attempt.OwnerUID, attempt.RequestID); lookupErr != nil {
 				return deferWorkflowAttempt(attempt)
@@ -397,10 +411,11 @@ func processWorkflowVideoAttempt(ctx context.Context, attempt model.WorkflowOutp
 				logWorkflowAttempt(attempt, "recovered")
 				return deferWorkflowAttempt(attempt)
 			}
-			if _, safe := err.(interface{ SafeMessage() string }); !safe {
-				return deferWorkflowAttempt(attempt)
+			var safe interface{ SafeMessage() string }
+			if errors.As(err, &safe) {
+				return failWorkflowAttempt(attempt, err)
 			}
-			return failWorkflowAttempt(attempt, err)
+			return retryWorkflowTaskCreation(attempt, err)
 		}
 		attempt.TaskID, attempt.TaskType = view.ID, "video"
 		logWorkflowAttempt(attempt, "submitted")
@@ -526,6 +541,7 @@ func applyWorkflowVideoView(attempt model.WorkflowOutputAttempt, view VideoTaskV
 }
 
 func failWorkflowAttempt(attempt model.WorkflowOutputAttempt, err error) error {
+	log.Printf("workflow failure run=%s node=%s slot=%s attempt=%d task=%s category=%s", attempt.RunID, attempt.NodeID, attempt.SlotID, attempt.Attempt, attempt.TaskID, taskErrorCategory(err))
 	attempt.Status, attempt.Error = "failed", workflowAttemptError(err)
 	return persistWorkflowAttempt(attempt, "failed", time.Now().UTC(), true, "failed")
 }
@@ -548,8 +564,25 @@ func workflowAttemptError(err error) string {
 	if err == nil {
 		return "生成失败"
 	}
-	if safe, ok := err.(interface{ SafeMessage() string }); ok {
+	var safe interface{ SafeMessage() string }
+	if errors.As(err, &safe) {
 		return safe.SafeMessage()
 	}
 	return "生成任务处理失败"
+}
+
+// The deadline is persisted implicitly by CreatedAt, so restarts cannot restart
+// an endless submission loop. Call only after verifying no durable task exists.
+func workflowTaskCreationExpired(attempt model.WorkflowOutputAttempt, current time.Time) bool {
+	return attempt.TaskID == "" && !attempt.CreatedAt.IsZero() && current.Sub(attempt.CreatedAt) >= workflowCreateRetryWindow
+}
+
+func retryWorkflowTaskCreation(attempt model.WorkflowOutputAttempt, err error) error {
+	if workflowTaskCreationExpired(attempt, time.Now().UTC()) {
+		return failWorkflowAttempt(attempt, safeMessageError{message: "创建生成任务超时，尚未提交供应商；请检查参考素材或网络后重试"})
+	}
+	log.Printf("workflow create retry run=%s node=%s slot=%s attempt=%d request=%s category=%s", attempt.RunID, attempt.NodeID, attempt.SlotID, attempt.Attempt, attempt.RequestID, taskErrorCategory(err))
+	attempt.Status = "submitting"
+	attempt.Error = "创建生成任务暂时失败，正在重试（最多等待 60 秒）"
+	return persistWorkflowAttempt(attempt, "submitting", time.Now().UTC().Add(workflowCreateRetryDelay), false, "")
 }

@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
+	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/basketikun/infinite-canvas/ai"
 	"github.com/basketikun/infinite-canvas/model"
 	"github.com/basketikun/infinite-canvas/repository"
@@ -58,6 +61,14 @@ func readImageTaskMediaReferences(ctx context.Context, user PortalUser, mediaIDs
 		}
 		reader, err := store.Get(ctx, item.ObjectKey)
 		if err != nil {
+			log.Printf("image reference read failed media=%s category=%s", item.ID, taskErrorCategory(err))
+			var serviceError *oss.ServiceError
+			if errors.Is(err, os.ErrNotExist) || (errors.As(err, &serviceError) && serviceError.Code == "NoSuchKey") {
+				return nil, safeMessageError{message: "参考图片文件不存在，请重新上传或替换图片后重新运行"}
+			}
+			if serviceError != nil && serviceError.StatusCode == 403 {
+				return nil, safeMessageError{message: "参考图片存储访问被拒绝，请联系管理员检查存储权限"}
+			}
 			return nil, err
 		}
 		data, readErr := io.ReadAll(io.LimitReader(reader, maxMediaBytes+1))

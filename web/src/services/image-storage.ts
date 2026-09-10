@@ -799,7 +799,7 @@ export async function promoteImageStorageKey(image: UploadedImage, mediaId: stri
     return currentOperations().promoteImageStorageKey(image, mediaId, options);
 }
 
-export type RemoteImageAccess = { url: string; previewUrl?: string };
+export type RemoteImageAccess = { url: string; previewUrl?: string; width?: number; height?: number };
 
 export async function getRemoteImageAccess(mediaId: string): Promise<RemoteImageAccess> {
     const response = await fetch(appApiPath(`/api/v1/media/${encodeURIComponent(mediaId)}/access`), { cache: "no-store" });

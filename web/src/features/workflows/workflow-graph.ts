@@ -1,4 +1,5 @@
 import { nanoid } from "nanoid";
+import { fitNodeSize } from "@/app/(user)/canvas/utils/canvas-node-size";
 
 import type { WorkflowConnection, WorkflowGraph, WorkflowMediaType, WorkflowNode, WorkflowNodeType, WorkflowPosition } from "./types";
 
@@ -56,7 +57,9 @@ export function workflowSourceType(node: WorkflowNode, slotId: string): Workflow
     return node.outputs?.find((slot) => slot.id === slotId)?.type;
 }
 
-export function addWorkflowConnection(graph: WorkflowGraph, input: { sourceNodeId: string; sourceSlotId: string; targetNodeId: string }): WorkflowGraph {
+export type WorkflowConnectionInput = { sourceNodeId: string; sourceSlotId: string; targetNodeId: string };
+
+export function validateWorkflowConnection(graph: WorkflowGraph, input: WorkflowConnectionInput) {
     const source = graph.nodes.find((node) => node.id === input.sourceNodeId);
     const target = graph.nodes.find((node) => node.id === input.targetNodeId);
     if (!source || !target) throw new Error("连接节点不存在");
@@ -69,6 +72,11 @@ export function addWorkflowConnection(graph: WorkflowGraph, input: { sourceNodeI
     if (graph.connections.filter((connection) => connection.targetNodeId === target.id).length >= MAX_INPUTS) throw new Error("每个生成步骤最多连接 9 个输入");
     if (createsCycle(graph, source.id, target.id)) throw new Error("连接不能形成循环");
 
+    return { source, target, sourceType };
+}
+
+export function addWorkflowConnection(graph: WorkflowGraph, input: WorkflowConnectionInput): WorkflowGraph {
+    const { target, sourceType } = validateWorkflowConnection(graph, input);
     const portIndex = (target.inputPorts || []).filter((port) => port.type === sourceType).length + 1;
     const port = { id: `${target.id}-input-${sourceType}-${portIndex}-${nanoid(5)}`, type: sourceType };
     const targetConnections = graph.connections.filter((connection) => connection.targetNodeId === target.id);
@@ -142,10 +150,12 @@ export function removeWorkflowNode(graph: WorkflowGraph, nodeId: string): Workfl
     const connections = graph.connections.filter((connection) => connection.sourceNodeId !== nodeId && connection.targetNodeId !== nodeId);
     return {
         ...graph,
-        nodes: graph.nodes.filter((node) => node.id !== nodeId).map((node) => {
-            const usedPortIds = new Set(connections.filter((connection) => connection.targetNodeId === node.id).map((connection) => connection.targetPortId));
-            return { ...node, inputPorts: node.inputPorts?.filter((port) => usedPortIds.has(port.id)) };
-        }),
+        nodes: graph.nodes
+            .filter((node) => node.id !== nodeId)
+            .map((node) => {
+                const usedPortIds = new Set(connections.filter((connection) => connection.targetNodeId === node.id).map((connection) => connection.targetPortId));
+                return { ...node, inputPorts: node.inputPorts?.filter((port) => usedPortIds.has(port.id)) };
+            }),
         connections,
     };
 }
@@ -179,4 +189,18 @@ function createsCycle(graph: WorkflowGraph, sourceNodeId: string, targetNodeId: 
         graph.connections.filter((connection) => connection.sourceNodeId === current).forEach((connection) => queue.push(connection.targetNodeId));
     }
     return false;
+}
+
+export function workflowViewportCenter(viewport: { x: number; y: number; k: number }, size: { width: number; height: number }): WorkflowPosition {
+    return { x: (size.width / 2 - viewport.x) / viewport.k, y: (size.height / 2 - viewport.y) / viewport.k };
+}
+
+// Preserve the node's center when an empty placeholder becomes an image.
+export function fitWorkflowImage<T extends { width?: number; height?: number; position?: WorkflowPosition }>(node: T, dimensions: { width: number; height: number }, force = false): T {
+    if (!(Number.isFinite(dimensions.width) && dimensions.width > 0 && Number.isFinite(dimensions.height) && dimensions.height > 0)) return node;
+    // Older workflows stored only the placeholder size. Do not reset custom sizes on resource reload.
+    if (!force && ((node.width || 340) !== 340 || (node.height || 240) !== 240)) return node;
+    const size = fitNodeSize(dimensions.width, dimensions.height);
+    if (size.width === node.width && size.height === node.height) return node;
+    return { ...node, ...size, ...(node.position ? { position: { x: node.position.x + ((node.width || 340) - size.width) / 2, y: node.position.y + ((node.height || 240) - size.height) / 2 } } : {}) };
 }

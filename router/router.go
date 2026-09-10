@@ -9,7 +9,14 @@ import (
 )
 
 func New() *gin.Engine {
-	router := gin.Default()
+	router := gin.New()
+	router.Use(gin.Logger(), gin.CustomRecovery(func(c *gin.Context, recovered any) {
+		// Streaming errors must reach net/http so a partial ZIP is a failed download.
+		if recovered == http.ErrAbortHandler {
+			panic(http.ErrAbortHandler)
+		}
+		c.AbortWithStatus(http.StatusInternalServerError)
+	}))
 	router.RedirectTrailingSlash = false
 	_ = router.SetTrustedProxies(nil)
 	router.POST("/internal/portal/directory-sync", gin.WrapF(handler.PortalDirectorySync))
@@ -41,6 +48,7 @@ func New() *gin.Engine {
 	v1.DELETE("/workflows/:id", func(c *gin.Context) { handler.DeleteWorkflow(c.Writer, c.Request, c.Param("id")) })
 	v1.POST("/workflows/:id/runs", func(c *gin.Context) { handler.CreateWorkflowRun(c.Writer, c.Request, c.Param("id")) })
 	v1.GET("/workflow-runs", gin.WrapF(handler.WorkflowRuns))
+	v1.GET("/workflow-runs/:id/images/download", func(c *gin.Context) { handler.WorkflowRunImages(c.Writer, c.Request, c.Param("id")) })
 	v1.GET("/workflow-runs/:id", func(c *gin.Context) { handler.WorkflowRun(c.Writer, c.Request, c.Param("id")) })
 	v1.POST("/workflow-runs/:id/stop", func(c *gin.Context) { handler.StopWorkflowRun(c.Writer, c.Request, c.Param("id")) })
 	v1.POST("/workflow-runs/:id/retry", func(c *gin.Context) { handler.RetryWorkflowRunOutput(c.Writer, c.Request, c.Param("id")) })

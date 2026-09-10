@@ -2,16 +2,34 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { App, Button, Drawer, Empty, Input, Modal, Spin } from "antd";
-import { ArrowLeft, Clapperboard, Clock3, Image as ImageIcon, Images, LocateFixed, Play, Save, Square, Type, Video, WandSparkles, ZoomIn, ZoomOut } from "lucide-react";
+import { Download, Image as ImageIcon, Play, Square, Video } from "lucide-react";
 import { nanoid } from "nanoid";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 
-import { AppActions } from "@/components/layout/app-actions";
+import { EditorSyncStatus } from "@/components/editor-sync-status";
+import { useEditorNavigation } from "@/components/layout/editor-navigation";
+import { useNavigationRoute } from "@/components/layout/use-navigation-route";
+import { downloadWorkflowImages } from "@/services/workflow-download";
+import { CanvasEditorTopBar } from "@/components/canvas-editor-top-bar";
+import { CanvasToolbar } from "@/app/(user)/canvas/components/canvas-toolbar";
+import { CanvasZoomControls } from "@/app/(user)/canvas/components/canvas-zoom-controls";
+import { InfiniteCanvas, type InfiniteCanvasHandle } from "@/app/(user)/canvas/components/infinite-canvas";
+import { Minimap } from "@/app/(user)/canvas/components/canvas-mini-map";
+import { ConnectionPath, ActiveConnectionPath } from "@/app/(user)/canvas/components/canvas-connections";
+import { useCanvasHistory } from "@/app/(user)/canvas/hooks/use-canvas-history";
+import { createWorkflowAutosave, type WorkflowAutosaveState } from "./workflow-autosave";
+import { useWorkflowEditorLease } from "./workflow-editor-lease";
+import { defaultWorkflowView, readWorkflowView, writeWorkflowView } from "./workflow-view-preferences";
+import { useWorkflowInteractions } from "./use-workflow-interactions";
+import { workflowVisualNodeId, workflowVisualOutputId, applyWorkflowVisualNodes } from "./workflow-canvas-adapter";
+import { resizeCanvasNode } from "@/lib/canvas-resize";
+import type { CanvasResizeCorner } from "@/components/canvas-node-primitives";
 import { ScopedVideoResourceProvider } from "@/app/(user)/canvas/components/canvas-video-content";
 import { CanvasNodeType, type CanvasNodeData } from "@/app/(user)/canvas/types";
 import { useCanvasImageResources } from "@/app/(user)/canvas/media/use-canvas-image-resources";
 import { isCanvasNodeNearViewport } from "@/app/(user)/canvas/utils/canvas-node-visibility";
+import { readImageMeta } from "@/lib/image-utils";
 import { appPath } from "@/lib/app-path";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { isEditableTarget } from "@/lib/editable-target";
@@ -26,21 +44,31 @@ import { reconcileProviderConfig, useConfigStore } from "@/stores/use-config-sto
 import { useThemeStore } from "@/stores/use-theme-store";
 import { reconcileVideoConfig } from "@/lib/video-config";
 import { workflowConfigFromAiConfig } from "./workflow-config";
-import { addWorkflowConnection, createWorkflowNode, emptyWorkflowGraph, findAvailableWorkflowNodePosition, findWorkflowConnection, removeWorkflowConnection, removeWorkflowNode, removeWorkflowOutput, setWorkflowOutputCount, workflowConnectionKey, workflowSourceType, type WorkflowConnectionIdentity } from "./workflow-graph";
+import { createWorkflowNode, emptyWorkflowGraph, fitWorkflowImage, workflowViewportCenter, removeWorkflowNode, removeWorkflowOutput, setWorkflowOutputCount, workflowSourceType } from "./workflow-graph";
 import { applyWorkflowSaveResult, cacheSavedWorkflow, clearWorkflowDraft, readWorkflowDraft, remoteWorkflowEditorState, workflowDetailQueryKey, workflowEditorSnapshot, writeWorkflowDraft, type WorkflowEditorDocument } from "./workflow-editor-state";
 import { WorkflowNodeCard, WorkflowOutputCard, type WorkflowPreviewInput } from "./workflow-node";
 import { WorkflowMediaPreview } from "./workflow-media-preview";
+import { WorkflowImageAssetCard } from "./workflow-image-asset-card";
 import { WorkflowRunDetail } from "./workflow-run-detail";
-import { clearPendingWorkflowRetryRequest, clearPendingWorkflowRunRequest, ensureWorkflowRetryRequest, ensureWorkflowRunRequest, pendingWorkflowRetryKey, readPendingWorkflowRetryRequests, readPendingWorkflowRunRequest, workflowRetryWasAccepted, writePendingWorkflowRetryRequest, writePendingWorkflowRunRequest, type PendingWorkflowRetryRequest, type PendingWorkflowRunRequest } from "./workflow-run-requests";
-import { findWorkflowOutput, isRetryableImageOutput, isWorkflowRunActive, latestWorkflowRun, workflowOutputKey, workflowOutputResourceNodeId, workflowRunStatusText } from "./workflow-run-state";
+import {
+    clearPendingWorkflowRetryRequest,
+    clearPendingWorkflowRunRequest,
+    ensureWorkflowRetryRequest,
+    ensureWorkflowRunRequest,
+    pendingWorkflowRetryKey,
+    readPendingWorkflowRetryRequests,
+    readPendingWorkflowRunRequest,
+    workflowRetryWasAccepted,
+    writePendingWorkflowRetryRequest,
+    writePendingWorkflowRunRequest,
+    type PendingWorkflowRetryRequest,
+    type PendingWorkflowRunRequest,
+} from "./workflow-run-requests";
+import { workflowDownloadImageCount, findCompatibleWorkflowOutput, findWorkflowOutput, isRetryableImageOutput, isWorkflowRunActive, latestWorkflowRun, workflowOutputKey, workflowOutputResourceNodeId, workflowRunStatusText } from "./workflow-run-state";
 import { observeWorkflowViewport } from "./workflow-viewport";
-import type { WorkflowConnection, WorkflowGraph, WorkflowNode, WorkflowNodeType, WorkflowOutputSlot, WorkflowPosition } from "./types";
+import type { WorkflowGraph, WorkflowNode, WorkflowNodeType, WorkflowOutputSlot, WorkflowPosition } from "./types";
 
 type Viewport = { x: number; y: number; k: number };
-type Selection = { kind: "node"; nodeId: string } | { kind: "output"; nodeId: string; slotId: string } | ({ kind: "connection" } & WorkflowConnectionIdentity) | null;
-type ConnectionStart = { nodeId: string; slotId: string } | null;
-type DragState = { kind: "node" | "output"; nodeId: string; slotId?: string; startX: number; startY: number; position: WorkflowPosition } | null;
-type SaveVariables = { revision: number; name: string; graph: WorkflowGraph; editorSnapshot: string };
 
 function isDefinitiveWorkflowMutationError(error: unknown) {
     return error instanceof ApiRequestError && error.status >= 400 && error.status < 500;
@@ -48,8 +76,19 @@ function isDefinitiveWorkflowMutationError(error: unknown) {
 
 export function WorkflowEditor() {
     const route = useParams<{ id: string | string[] }>();
+    const session = useQuery(portalSessionQuery);
+    return <WorkflowEditorContent key={JSON.stringify([route.id, session.data?.user.uid])} />;
+}
+
+function WorkflowEditorContent() {
+    const route = useParams<{ id: string | string[] }>();
     const workflowId = Array.isArray(route.id) ? route.id[0] : route.id;
     const router = useRouter();
+    const editorNavigation = useEditorNavigation();
+    const { home } = useNavigationRoute();
+    const [downloading, setDownloading] = useState(false);
+    const downloadController = useRef<AbortController | null>(null);
+    useEffect(() => () => downloadController.current?.abort(), []);
     const queryClient = useQueryClient();
     const { message, modal } = App.useApp();
     const session = useQuery({ ...portalSessionQuery, refetchOnMount: "always" });
@@ -60,12 +99,12 @@ export function WorkflowEditor() {
     const assets = useAssetStore((state) => state.assets);
     const refreshAssets = useAssetStore((state) => state.refreshFromServer);
     const containerRef = useRef<HTMLDivElement>(null);
+    const canvasRef = useRef<InfiniteCanvasHandle>(null);
     const imageInputRef = useRef<HTMLInputElement>(null);
     const videoInputRef = useRef<HTMLInputElement>(null);
     const loadedRef = useRef("");
     const editorDocumentRef = useRef<WorkflowEditorDocument>({ name: "", graph: emptyWorkflowGraph() });
-    const dragRef = useRef<DragState>(null);
-    const panRef = useRef<{ x: number; y: number; viewport: Viewport } | null>(null);
+
     const requestRestoreScopeRef = useRef("");
     const retryRestoreScopeRef = useRef("");
     const [name, setName] = useState("");
@@ -73,37 +112,67 @@ export function WorkflowEditor() {
     const [revision, setRevision] = useState(0);
     const [savedSnapshot, setSavedSnapshot] = useState("");
     const [viewport, setViewport] = useState<Viewport>({ x: 80, y: 80, k: 0.8 });
-    const [selection, setSelection] = useState<Selection>(null);
-    const [connectionStart, setConnectionStart] = useState<ConnectionStart>(null);
-    const [mouseWorld, setMouseWorld] = useState<WorkflowPosition>({ x: 0, y: 0 });
+    const [titleEditing, setTitleEditing] = useState(false);
+    const [titleDraft, setTitleDraft] = useState("");
+    const [backgroundMode, setBackgroundMode] = useState(defaultWorkflowView.backgroundMode);
+    const [showImageInfo, setShowImageInfo] = useState(false);
+    const [miniMapOpen, setMiniMapOpen] = useState(false);
+    const [viewScope, setViewScope] = useState("");
+    const [mediaPreview, setMediaPreview] = useState<{ node: WorkflowNode; slot?: WorkflowOutputSlot }>();
+    const [resizing, setResizing] = useState(false);
+    const [starting, setStarting] = useState(false);
+    const [draftRecoveryPending, setDraftRecoveryPending] = useState(false);
+    const draftRecoveryKey = useRef("");
+    const [saveState, setSaveState] = useState<WorkflowAutosaveState>({ revision: 0, dirty: false, status: "idle", error: undefined });
+    const saveCallbacks = useRef<{ onSaved: (saved: NonNullable<typeof workflow.data>, snapshot: string) => void; onError: (error: unknown) => void }>({ onSaved: () => {}, onError: () => {} });
+    const refreshForLease = useRef<(signal?: AbortSignal) => Promise<void>>(async () => {});
+    const autosave = useMemo(
+        () =>
+            createWorkflowAutosave({
+                save: (document, currentRevision) => updateWorkflow(workflowId!, { ...document, revision: currentRevision }),
+                onSaved: (saved, snapshot) => saveCallbacks.current.onSaved(saved, snapshot),
+                onError: (error) => saveCallbacks.current.onError(error),
+                isConflict: (error) => error instanceof ApiRequestError && error.status === 409,
+            }),
+        [workflowId, draftOwnerUID],
+    );
+    useEffect(() => {
+        autosave.activate();
+        const unsubscribe = autosave.subscribe(() => setSaveState(autosave.getState()));
+        return () => {
+            unsubscribe();
+            autosave.dispose();
+        };
+    }, [autosave]);
     const [mediaTarget, setMediaTarget] = useState<{ nodeId?: string; type: "image" | "video" }>();
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
     const [previewNodeId, setPreviewNodeId] = useState<string>();
     const [uploading, setUploading] = useState(false);
     const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
-    const [canvasElement, setCanvasElement] = useState<HTMLDivElement | null>(null);
+
     const [currentRunId, setCurrentRunId] = useState<string | null>();
     const [runDetailOpen, setRunDetailOpen] = useState(false);
     const [pendingRunRequest, setPendingRunRequest] = useState<PendingWorkflowRunRequest>();
     const [pendingRetryRequests, setPendingRetryRequests] = useState<Record<string, PendingWorkflowRetryRequest>>({});
-    const attachCanvasElement = useCallback((element: HTMLDivElement | null) => {
-        containerRef.current = element;
-        setCanvasElement(element);
-    }, []);
 
     const workflow = useQuery({ queryKey: workflowDetailQueryKey(workflowId), queryFn: () => fetchWorkflow(workflowId!), enabled: Boolean(workflowId), refetchOnMount: "always", refetchOnWindowFocus: false, refetchOnReconnect: false });
+    const lease = useWorkflowEditorLease(draftOwnerUID, workflow.data ? workflowId : undefined, async (signal?: AbortSignal) => refreshForLease.current(signal));
+    const readOnly = !lease.editable || draftRecoveryPending;
+    const editBlocked = readOnly || starting || Boolean(pendingRunRequest);
+    const editBlockedRef = useRef(editBlocked);
+    editBlockedRef.current = editBlocked;
     const workflowVideos = useQuery({ queryKey: ["workflow-video-assets"], queryFn: fetchWorkflowVideos, enabled: assetPickerOpen && mediaTarget?.type === "video" });
     const workflowRuns = useQuery({
         queryKey: ["workflow-runs", "workflow", workflowId],
         queryFn: () => fetchWorkflowRuns(1, 1, workflowId),
         enabled: Boolean(workflowId && workflow.data),
-        refetchInterval: (query) => query.state.data?.items.some((run) => run.workflowId === workflowId && isWorkflowRunActive(run.status)) ? 2500 : false,
+        refetchInterval: (query) => (query.state.data?.items.some((run) => run.workflowId === workflowId && isWorkflowRunActive(run.status)) ? 2500 : false),
     });
     const currentRun = useQuery({
         queryKey: ["workflow-run", currentRunId],
         queryFn: () => fetchWorkflowRun(currentRunId!),
         enabled: Boolean(currentRunId),
-        refetchInterval: (query) => isWorkflowRunActive(query.state.data?.run.status) ? 1500 : false,
+        refetchInterval: (query) => (isWorkflowRunActive(query.state.data?.run.status) ? 1500 : false),
     });
     useEffect(() => {
         setCurrentRunId(undefined);
@@ -151,31 +220,94 @@ export function WorkflowEditor() {
     const currentSnapshot = useMemo(() => workflowEditorSnapshot({ name, graph }), [graph, name]);
     editorDocumentRef.current = { name, graph };
     const dirty = Boolean(savedSnapshot && currentSnapshot !== savedSnapshot);
-    const applyRemoteWorkflow = useCallback((remote: NonNullable<typeof workflow.data>, restoreDraft = true) => {
-        const remoteState = remoteWorkflowEditorState("", 0, false, remote)!;
-        const draft = restoreDraft && draftOwnerUID && typeof window !== "undefined" ? readWorkflowDraft(window.sessionStorage, draftOwnerUID, remote.id) : undefined;
-        const restore = draft?.revision === remote.revision && workflowEditorSnapshot(draft.document) !== remoteState.savedSnapshot;
-        if (draft && !restore && draftOwnerUID) clearWorkflowDraft(window.sessionStorage, draftOwnerUID, remote.id);
-        loadedRef.current = remote.id;
-        setName(restore ? draft.document.name : remoteState.document.name);
-        setGraph(restore ? draft.document.graph : remoteState.document.graph);
-        setRevision(remoteState.revision);
-        setSavedSnapshot(remoteState.savedSnapshot);
-        if (restore) message.info("已恢复未保存的流程修改");
-    }, [draftOwnerUID, message]);
+    const history = useCanvasHistory({
+        snapshot: currentSnapshot,
+        applySnapshot: (snapshot: string) => {
+            const document = JSON.parse(snapshot) as WorkflowEditorDocument;
+            setName(document.name);
+            setGraph(document.graph);
+        },
+        isReady: Boolean(savedSnapshot),
+    });
+    const applyRemoteWorkflow = useCallback(
+        (remote: NonNullable<typeof workflow.data>, restoreDraft = true) => {
+            const remoteState = remoteWorkflowEditorState("", 0, false, remote)!;
+            const draft = restoreDraft && draftOwnerUID && typeof window !== "undefined" ? readWorkflowDraft(window.sessionStorage, draftOwnerUID, remote.id) : undefined;
+            const restore = draft?.revision === remote.revision && workflowEditorSnapshot(draft.document) !== remoteState.savedSnapshot;
+            if (draft && !restore && draft.revision !== remote.revision && draftRecoveryKey.current !== `${remote.id}:${draft.revision}`) {
+                draftRecoveryKey.current = `${remote.id}:${draft.revision}`;
+                setDraftRecoveryPending(true);
+                modal.confirm({
+                    title: "发现未保存的本地草稿",
+                    content: "远端已有更新。恢复草稿将以本地内容替换当前编辑内容并自动保存；使用远端将清除旧草稿。",
+                    okText: "恢复草稿",
+                    cancelText: "使用远端",
+                    closable: false,
+                    maskClosable: false,
+                    onOk: () => {
+                        setName(draft.document.name);
+                        setGraph(draft.document.graph);
+                        history.replaceBaseline(workflowEditorSnapshot(draft.document));
+                        setDraftRecoveryPending(false);
+                    },
+                    onCancel: () => {
+                        if (draftOwnerUID) clearWorkflowDraft(window.sessionStorage, draftOwnerUID, remote.id);
+                        setDraftRecoveryPending(false);
+                    },
+                });
+            }
+            loadedRef.current = remote.id;
+            setName(restore ? draft.document.name : remoteState.document.name);
+            setGraph(restore ? draft.document.graph : remoteState.document.graph);
+            setRevision(remoteState.revision);
+            setSavedSnapshot(remoteState.savedSnapshot);
+            autosave.reset(remoteState.document, remote.revision);
+            history.replaceBaseline(workflowEditorSnapshot(restore ? draft.document : remoteState.document));
+            if (restore) message.info("已恢复未保存的流程修改");
+        },
+        [autosave, draftOwnerUID, message],
+    );
     useEffect(() => {
         if (!draftOwnerUID || session.isFetching || !workflow.data || workflow.isFetching || !remoteWorkflowEditorState(loadedRef.current, revision, dirty, workflow.data)) return;
         applyRemoteWorkflow(workflow.data);
     }, [applyRemoteWorkflow, dirty, draftOwnerUID, revision, session.isFetching, workflow.data, workflow.isFetching]);
-    useLayoutEffect(() => observeWorkflowViewport(canvasElement, setViewportSize, (update) => new ResizeObserver(update)), [canvasElement]);
-    const previewImageNodeIds = useMemo(() => new Set(graph.connections.flatMap((connection) => {
-        if (connection.targetNodeId !== previewNodeId) return [];
-        const source = graph.nodes.find((node) => node.id === connection.sourceNodeId);
-        if (!source || workflowSourceType(source, connection.sourceSlotId) !== "image") return [];
-        if (connection.sourceSlotId === "output") return [source.id];
-        const output = currentRun.data ? findWorkflowOutput(currentRun.data.outputs, source.id, connection.sourceSlotId) : undefined;
-        return output?.mediaId && currentRun.data ? [workflowOutputResourceNodeId(currentRun.data.run.id, source.id, connection.sourceSlotId)] : [];
-    })), [currentRun.data, graph.connections, graph.nodes, previewNodeId]);
+    refreshForLease.current = async (signal) => {
+        if (dirty && draftOwnerUID) writeWorkflowDraft(window.sessionStorage, draftOwnerUID, workflowId!, { revision, document: editorDocumentRef.current });
+        const remote = await fetchWorkflow(workflowId!);
+        if (signal?.aborted) return;
+        cacheSavedWorkflow(queryClient, remote);
+        applyRemoteWorkflow(remote);
+    };
+    useLayoutEffect(() => observeWorkflowViewport(containerRef.current, setViewportSize, (update) => new ResizeObserver(update)), [Boolean(workflow.data), Boolean(savedSnapshot)]);
+    useEffect(() => {
+        if (!draftOwnerUID || !workflowId) return;
+        const restored = readWorkflowView(window.localStorage, draftOwnerUID, workflowId);
+        setViewport(restored.viewport);
+        setBackgroundMode(restored.backgroundMode);
+        setShowImageInfo(restored.showImageInfo);
+        setViewScope(JSON.stringify([draftOwnerUID, workflowId]));
+    }, [draftOwnerUID, workflowId]);
+    useEffect(() => {
+        if (!draftOwnerUID || !workflowId || viewScope !== JSON.stringify([draftOwnerUID, workflowId])) return;
+        const timer = setTimeout(() => writeWorkflowView(window.localStorage, draftOwnerUID, workflowId, { viewport, backgroundMode, showImageInfo }), 300);
+        return () => clearTimeout(timer);
+    }, [draftOwnerUID, workflowId, viewScope, viewport, backgroundMode, showImageInfo]);
+    const previewImageNodeIds = useMemo(
+        () =>
+            new Set(
+                graph.connections
+                    .flatMap((connection) => {
+                        if (connection.targetNodeId !== previewNodeId) return [];
+                        const source = graph.nodes.find((node) => node.id === connection.sourceNodeId);
+                        if (!source || workflowSourceType(source, connection.sourceSlotId) !== "image") return [];
+                        if (connection.sourceSlotId === "output") return [source.id];
+                        const output = currentRun.data ? findCompatibleWorkflowOutput(currentRun.data, graph, source.id, connection.sourceSlotId) : undefined;
+                        return output?.mediaId && currentRun.data ? [workflowOutputResourceNodeId(currentRun.data.run.id, source.id, connection.sourceSlotId)] : [];
+                    })
+                    .concat(mediaPreview ? [mediaPreview.slot && currentRun.data ? workflowOutputResourceNodeId(currentRun.data.run.id, mediaPreview.node.id, mediaPreview.slot.id) : mediaPreview.node.id] : []),
+            ),
+        [currentRun.data, graph.connections, graph.nodes, previewNodeId, mediaPreview],
+    );
     const imageTargets = useMemo(() => {
         const inputTargets = graph.nodes.flatMap((node) => {
             if (node.type !== "image_input" || !node.mediaId) return [];
@@ -186,20 +318,36 @@ export function WorkflowEditor() {
             if (!visible && !prefetch && !preview) return [];
             return [{ node: canvasNode, visible, pinned: preview, prefetch, preview }];
         });
-        const outputTargets = graph.nodes.flatMap((node) => (node.outputs || []).flatMap((slot) => {
-            if (slot.type !== "image" || !currentRun.data) return [];
-            const output = findWorkflowOutput(currentRun.data.outputs, node.id, slot.id);
-            if (output?.status !== "succeeded" || !output.mediaId) return [];
-            const canvasNode = { id: workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id), type: CanvasNodeType.Image, title: "", position: slot.position || node.position, width: slot.width || 340, height: slot.height || 240, metadata: { mediaId: output.mediaId } } satisfies CanvasNodeData;
-            const visible = isCanvasNodeNearViewport(canvasNode, viewport, viewportSize);
-            const preview = previewImageNodeIds.has(canvasNode.id);
-            const prefetch = !visible && isCanvasNodeNearViewport(canvasNode, viewport, viewportSize, 384);
-            if (!visible && !prefetch && !preview) return [];
-            return [{ node: canvasNode, visible, pinned: preview, prefetch, preview }];
-        }));
+        const outputTargets = graph.nodes.flatMap((node) =>
+            (node.outputs || []).flatMap((slot) => {
+                if (slot.type !== "image" || !currentRun.data) return [];
+                const output = findCompatibleWorkflowOutput(currentRun.data, graph, node.id, slot.id);
+                if (output?.status !== "succeeded" || !output.mediaId) return [];
+                const canvasNode = {
+                    id: workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id),
+                    type: CanvasNodeType.Image,
+                    title: "",
+                    position: slot.position || node.position,
+                    width: slot.width || 340,
+                    height: slot.height || 240,
+                    metadata: { mediaId: output.mediaId },
+                } satisfies CanvasNodeData;
+                const visible = isCanvasNodeNearViewport(canvasNode, viewport, viewportSize);
+                const preview = previewImageNodeIds.has(canvasNode.id);
+                const prefetch = !visible && isCanvasNodeNearViewport(canvasNode, viewport, viewportSize, 384);
+                if (!visible && !prefetch && !preview) return [];
+                return [{ node: canvasNode, visible, pinned: preview, prefetch, preview }];
+            }),
+        );
         return [...inputTargets, ...outputTargets];
     }, [currentRun.data, graph.nodes, previewImageNodeIds, viewport, viewportSize]);
-    const resolveImageAccess = useCallback((node: CanvasNodeData) => getRemoteImageAccess(node.metadata!.mediaId!), []);
+    const imageDimensions = useRef(new Map<string, { width: number; height: number }>());
+    const resolveImageAccess = useCallback(async (node: CanvasNodeData) => {
+        const mediaId = node.metadata!.mediaId!;
+        const access = await getRemoteImageAccess(mediaId);
+        if (access.width && access.height) imageDimensions.current.set(mediaId, { width: access.width, height: access.height });
+        return access;
+    }, []);
     const imageResources = useCanvasImageResources({ targets: imageTargets, scale: viewport.k, resolveAccess: resolveImageAccess });
     useEffect(() => {
         if (!dirty) return;
@@ -208,64 +356,50 @@ export function WorkflowEditor() {
         return () => window.removeEventListener("beforeunload", beforeUnload);
     }, [dirty]);
     useEffect(() => {
-        if (!draftOwnerUID || !workflowId || !savedSnapshot || typeof window === "undefined") return;
+        if (!draftOwnerUID || !workflowId || !savedSnapshot || !lease.editable || draftRecoveryPending || typeof window === "undefined") return;
         if (dirty) writeWorkflowDraft(window.sessionStorage, draftOwnerUID, workflowId, { revision, document: { name, graph } });
         else clearWorkflowDraft(window.sessionStorage, draftOwnerUID, workflowId);
-    }, [dirty, draftOwnerUID, graph, name, revision, savedSnapshot, workflowId]);
+    }, [dirty, draftOwnerUID, graph, name, revision, savedSnapshot, workflowId, lease.editable, draftRecoveryPending]);
     useEffect(() => {
         if (assetPickerOpen && mediaTarget?.type === "image") void refreshAssets().catch((error) => message.error(error instanceof Error ? error.message : "素材加载失败"));
     }, [assetPickerOpen, mediaTarget?.type, message, refreshAssets]);
 
-    const save = useMutation({
-        mutationFn: (submitted: SaveVariables) => updateWorkflow(workflowId!, { revision: submitted.revision, name: submitted.name, graph: submitted.graph }),
-        onSuccess: (saved, submitted) => {
-            const result = applyWorkflowSaveResult(editorDocumentRef.current, submitted.editorSnapshot, saved);
+    saveCallbacks.current = {
+        onSaved: (saved, submittedSnapshot) => {
+            const result = applyWorkflowSaveResult(editorDocumentRef.current, submittedSnapshot, saved);
             cacheSavedWorkflow(queryClient, saved);
             loadedRef.current = saved.id;
             setName(result.document.name);
             setGraph(result.document.graph);
             setRevision(result.revision);
             setSavedSnapshot(result.savedSnapshot);
-            message.success("流程已保存");
         },
         onError: (error) => {
-            if (error instanceof ApiRequestError && error.status === 409) {
-                modal.confirm({
-                    title: "流程已在其他页面更新",
-                    content: "重新加载会放弃当前未保存修改。",
-                    okText: "重新加载",
-                    cancelText: "保留当前修改",
-                    onOk: async () => {
-                        if (draftOwnerUID) clearWorkflowDraft(window.sessionStorage, draftOwnerUID, workflowId!);
-                        const remote = await fetchWorkflow(workflowId!);
-                        cacheSavedWorkflow(queryClient, remote);
-                        applyRemoteWorkflow(remote, false);
-                    },
-                });
-            }
-            else message.error(error instanceof Error ? error.message : "保存流程失败");
+            message.error(error instanceof Error ? error.message : "保存流程失败");
         },
-    });
-    const cacheRun = useCallback((detail: NonNullable<typeof currentRun.data>) => {
-        queryClient.setQueryData(["workflow-run", detail.run.id], detail);
-        setCurrentRunId(detail.run.id);
-        void queryClient.invalidateQueries({ queryKey: ["workflow-runs"] });
-    }, [queryClient]);
+    };
+    const cacheRun = useCallback(
+        (detail: NonNullable<typeof currentRun.data>) => {
+            queryClient.setQueryData(["workflow-run", detail.run.id], detail);
+            setCurrentRunId(detail.run.id);
+            void queryClient.invalidateQueries({ queryKey: ["workflow-runs"] });
+        },
+        [queryClient],
+    );
     const createRun = useMutation({
         retry: false,
-        mutationFn: (request: PendingWorkflowRunRequest) => createWorkflowRun(request.workflowId, request.requestId),
+        mutationFn: (request: PendingWorkflowRunRequest) => createWorkflowRun(request.workflowId, request.requestId, request.revision),
         onSuccess: (detail, request) => {
             cacheRun(detail);
             if (draftOwnerUID && typeof window !== "undefined") clearPendingWorkflowRunRequest(window.sessionStorage, draftOwnerUID, request.workflowId);
-            setPendingRunRequest((current) => current?.requestId === request.requestId ? undefined : current);
+            setPendingRunRequest((current) => (current?.requestId === request.requestId ? undefined : current));
             message.success("流程已开始运行");
         },
         onError: (error, request) => {
             if (isDefinitiveWorkflowMutationError(error)) {
                 if (draftOwnerUID && typeof window !== "undefined") clearPendingWorkflowRunRequest(window.sessionStorage, draftOwnerUID, request.workflowId);
-                setPendingRunRequest((current) => current?.requestId === request.requestId ? undefined : current);
-            }
-            else {
+                setPendingRunRequest((current) => (current?.requestId === request.requestId ? undefined : current));
+            } else {
                 void workflowRuns.refetch();
                 message.warning("运行请求结果待确认，可再次点击并使用同一请求确认");
                 return;
@@ -314,15 +448,28 @@ export function WorkflowEditor() {
         },
     });
 
-    const startRun = () => {
-        const request = ensureWorkflowRunRequest(pendingRunRequest, workflowId!, revision, nanoid);
-        if (draftOwnerUID && typeof window !== "undefined") writePendingWorkflowRunRequest(window.sessionStorage, draftOwnerUID, request);
-        setPendingRunRequest(request);
-        createRun.mutate(request);
+    const startRun = async () => {
+        if (starting || createRun.isPending || readOnly) return;
+        setStarting(true);
+        try {
+            let confirmedRevision = revision;
+            if (!pendingRunRequest) {
+                autosave.update(editorDocumentRef.current);
+                confirmedRevision = await autosave.flush();
+            }
+            const request = ensureWorkflowRunRequest(pendingRunRequest, workflowId!, confirmedRevision, nanoid);
+            if (draftOwnerUID) writePendingWorkflowRunRequest(window.sessionStorage, draftOwnerUID, request);
+            setPendingRunRequest(request);
+            createRun.mutate(request);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "保存完成后才能运行");
+        } finally {
+            setStarting(false);
+        }
     };
     const startOutputRetry = (nodeId: string, slotId: string) => {
         if (!currentRun.data) return;
-        const output = findWorkflowOutput(currentRun.data.outputs, nodeId, slotId);
+        const output = findCompatibleWorkflowOutput(currentRun.data, graph, nodeId, slotId);
         if (!output) return;
         const key = pendingWorkflowRetryKey({ runId: currentRun.data.run.id, nodeId, slotId });
         const request = ensureWorkflowRetryRequest(pendingRetryRequests[key], { runId: currentRun.data.run.id, nodeId, slotId, attempt: output.attempt }, nanoid);
@@ -331,41 +478,69 @@ export function WorkflowEditor() {
         retryOutput.mutate(request);
     };
 
-    const updateNode = useCallback((nodeId: string, update: (node: WorkflowNode) => WorkflowNode) => setGraph((current) => ({ ...current, nodes: current.nodes.map((node) => node.id === nodeId ? update(node) : node) })), []);
-    const screenToWorld = useCallback((clientX: number, clientY: number) => {
-        const rect = containerRef.current?.getBoundingClientRect();
-        return { x: ((clientX - (rect?.left || 0)) - viewport.x) / viewport.k, y: ((clientY - (rect?.top || 0)) - viewport.y) / viewport.k };
-    }, [viewport]);
+    const updateNode = useCallback(
+        (nodeId: string, update: (node: WorkflowNode) => WorkflowNode) => {
+            if (!editBlockedRef.current) setGraph((current) => ({ ...current, nodes: current.nodes.map((node) => (node.id === nodeId ? update(node) : node)) }));
+        },
+        [readOnly],
+    );
+    const screenToWorld = useCallback(
+        (clientX: number, clientY: number) => {
+            const rect = containerRef.current?.getBoundingClientRect();
+            return { x: (clientX - (rect?.left || 0) - viewport.x) / viewport.k, y: (clientY - (rect?.top || 0) - viewport.y) / viewport.k };
+        },
+        [viewport],
+    );
     const centerPosition = useCallback(() => {
         const rect = containerRef.current?.getBoundingClientRect();
-        return { x: ((rect?.width || 1000) / 2 - viewport.x) / viewport.k - 180, y: ((rect?.height || 700) / 2 - viewport.y) / viewport.k - 120 };
+        return workflowViewportCenter(viewport, { width: rect?.width || 1000, height: rect?.height || 700 });
     }, [viewport]);
 
-    const addNode = useCallback((type: WorkflowNodeType, mediaId?: string) => {
-        const node = createWorkflowNode(type, findAvailableWorkflowNodePosition(graph, type, centerPosition()));
-        if (mediaId) node.mediaId = mediaId;
-        if (type === "image_generation" && aiStatus) {
-            const config = reconcileProviderConfig(globalConfig, aiStatus);
-            node.config = workflowConfigFromAiConfig(type, config);
-        }
-        if (type === "video_generation" && aiStatus) {
-            const config = reconcileVideoConfig(globalConfig, aiStatus);
-            node.config = workflowConfigFromAiConfig(type, config);
-        }
-        setGraph((current) => ({ ...current, nodes: [...current.nodes, node] }));
-        setSelection({ kind: "node", nodeId: node.id });
-    }, [aiStatus, centerPosition, globalConfig, graph]);
+    const makeNode = useCallback(
+        (type: WorkflowNodeType, position: WorkflowPosition) => {
+            const node = createWorkflowNode(type, position);
+            if (type === "image_generation" && aiStatus) node.config = workflowConfigFromAiConfig(type, reconcileProviderConfig(globalConfig, aiStatus));
+            if (type === "video_generation" && aiStatus) node.config = workflowConfigFromAiConfig(type, reconcileVideoConfig(globalConfig, aiStatus));
+            return node;
+        },
+        [aiStatus, globalConfig],
+    );
+    const addNode = useCallback(
+        (type: WorkflowNodeType, mediaId?: string, dimensions?: { width: number; height: number }) => {
+            if (editBlockedRef.current) return;
+            let node = makeNode(type, { x: 0, y: 0 });
+            if (type === "image_input" && dimensions) node = fitWorkflowImage(node, dimensions, true);
+            const center = centerPosition();
+            const position = { x: center.x - (node.width || 340) / 2, y: center.y - (node.height || 240) / 2 };
+            const dx = position.x - node.position.x;
+            const dy = position.y - node.position.y;
+            node = { ...node, position, outputs: node.outputs?.map((slot) => ({ ...slot, position: { x: (slot.position?.x || 0) + dx, y: (slot.position?.y || 0) + dy } })) };
+            if (mediaId) node.mediaId = mediaId;
+            setGraph((current) => ({ ...current, nodes: [...current.nodes, node] }));
+            canvas.setSelectedNodeIds(new Set([workflowVisualNodeId(node.id)]));
+        },
+        [makeNode, centerPosition],
+    );
 
     const chooseMedia = (nodeId: string | undefined, type: "image" | "video") => {
+        if (editBlockedRef.current) return;
         setMediaTarget({ nodeId, type });
         setAssetPickerOpen(true);
     };
     const uploadImage = async (file: File) => {
         setUploading(true);
         try {
+            const localUrl = URL.createObjectURL(file);
+            let dimensions: { width: number; height: number };
+            try {
+                dimensions = await readImageMeta(localUrl);
+            } finally {
+                URL.revokeObjectURL(localUrl);
+            }
             const uploaded = await uploadUserImage(file, "canvas");
-            if (mediaTarget?.nodeId) updateNode(mediaTarget.nodeId, (node) => ({ ...node, mediaId: uploaded.mediaId }));
-            else addNode("image_input", uploaded.mediaId);
+            if (editBlockedRef.current) return;
+            if (mediaTarget?.nodeId) updateNode(mediaTarget.nodeId, (node) => fitWorkflowImage({ ...node, mediaId: uploaded.mediaId }, dimensions, true));
+            else addNode("image_input", uploaded.mediaId, dimensions);
             setAssetPickerOpen(false);
         } catch (error) {
             message.error(error instanceof Error ? error.message : "图片上传失败");
@@ -390,13 +565,20 @@ export function WorkflowEditor() {
         }
     };
     const selectAsset = (mediaId: string) => {
-        if (mediaTarget?.nodeId) updateNode(mediaTarget.nodeId, (node) => ({ ...node, mediaId }));
-        else addNode(mediaTarget?.type === "video" ? "video_input" : "image_input", mediaId);
+        const asset = assets.find((item) => item.kind === "image" && item.metadata?.mediaId === mediaId);
+        const dimensions = asset?.kind === "image" ? asset.data : undefined;
+        if (mediaTarget?.nodeId)
+            updateNode(mediaTarget.nodeId, (node) => {
+                const next = { ...node, mediaId };
+                return node.type === "image_input" ? fitWorkflowImage(next, dimensions || { width: 340, height: 240 }, true) : next;
+            });
+        else addNode(mediaTarget?.type === "video" ? "video_input" : "image_input", mediaId, dimensions);
         setAssetPickerOpen(false);
         setMediaTarget(undefined);
     };
 
     const changeOutputCount = (nodeId: string, count: number) => {
+        if (editBlockedRef.current) return;
         try {
             setGraph(setWorkflowOutputCount(graph, nodeId, count));
         } catch (error) {
@@ -404,184 +586,448 @@ export function WorkflowEditor() {
         }
     };
 
-    const previewInputs = useCallback((targetId: string): WorkflowPreviewInput[] => graph.connections.filter((connection) => connection.targetNodeId === targetId).sort((left, right) => left.order - right.order).flatMap((connection) => {
-        const source = graph.nodes.find((node) => node.id === connection.sourceNodeId);
-        if (!source) return [];
-        const type = workflowSourceType(source, connection.sourceSlotId);
-        if (!type) return [];
-        const execution = connection.sourceSlotId === "output" || !currentRun.data ? undefined : findWorkflowOutput(currentRun.data.outputs, source.id, connection.sourceSlotId);
-        const resourceNodeId = execution && currentRun.data ? workflowOutputResourceNodeId(currentRun.data.run.id, source.id, connection.sourceSlotId) : source.id;
-        const mediaId = source.mediaId || execution?.mediaId;
-        const resource = imageResources.resources.get(resourceNodeId);
-        return [{ key: connection.targetPortId, sourceNodeId: resourceNodeId, type, ...(type === "text" ? { text: source.text } : mediaId ? { mediaId } : {}), ...(type === "image" && resource ? { imageUrl: resource.url, imageStorageKey: resource.storageKey } : {}), ...(type === "image" && imageResources.errors.get(resourceNodeId) ? { imageError: imageResources.errors.get(resourceNodeId) } : {}) }];
-    }), [currentRun.data, graph, imageResources.errors, imageResources.resources]);
+    const fitLoadedImage = (nodeId: string, mediaId: string, dimensions: { width: number; height: number }, slotId?: string) => {
+        if (editBlockedRef.current) return;
+        const asset = assets.find((item) => item.kind === "image" && item.metadata?.mediaId === mediaId);
+        dimensions = asset?.kind === "image" && asset.data.width > 0 && asset.data.height > 0 ? asset.data : imageDimensions.current.get(mediaId) || dimensions;
+        setGraph((current) => {
+            let changed = false;
+            const nodes = current.nodes.map((node) => {
+                if (node.id !== nodeId) return node;
+                if (!slotId) {
+                    if (node.mediaId !== mediaId || node.type !== "image_input") return node;
+                    const next = fitWorkflowImage(node, dimensions);
+                    changed ||= next !== node;
+                    return next;
+                }
+                const output = currentRun.data && findCompatibleWorkflowOutput(currentRun.data, current, nodeId, slotId);
+                if (output?.mediaId !== mediaId) return node;
+                const outputs = node.outputs?.map((slot) => {
+                    if (slot.id !== slotId || slot.type !== "image") return slot;
+                    const next = fitWorkflowImage(slot, dimensions);
+                    changed ||= next !== slot;
+                    return next;
+                });
+                return changed ? { ...node, outputs } : node;
+            });
+            return changed ? { ...current, nodes } : current;
+        });
+    };
+
+    const previewInputs = useCallback(
+        (targetId: string): WorkflowPreviewInput[] =>
+            graph.connections
+                .filter((connection) => connection.targetNodeId === targetId)
+                .sort((left, right) => left.order - right.order)
+                .flatMap((connection) => {
+                    const source = graph.nodes.find((node) => node.id === connection.sourceNodeId);
+                    if (!source) return [];
+                    const type = workflowSourceType(source, connection.sourceSlotId);
+                    if (!type) return [];
+                    const execution = connection.sourceSlotId === "output" || !currentRun.data ? undefined : findCompatibleWorkflowOutput(currentRun.data, graph, source.id, connection.sourceSlotId);
+                    const resourceNodeId = execution && currentRun.data ? workflowOutputResourceNodeId(currentRun.data.run.id, source.id, connection.sourceSlotId) : source.id;
+                    const mediaId = source.mediaId || execution?.mediaId;
+                    const resource = imageResources.resources.get(resourceNodeId);
+                    return [
+                        {
+                            key: connection.targetPortId,
+                            sourceNodeId: resourceNodeId,
+                            type,
+                            ...(type === "text" ? { text: source.text } : mediaId ? { mediaId } : {}),
+                            ...(type === "image" && resource ? { imageUrl: resource.url, imageStorageKey: resource.storageKey } : {}),
+                            ...(type === "image" && imageResources.errors.get(resourceNodeId) ? { imageError: imageResources.errors.get(resourceNodeId) } : {}),
+                        },
+                    ];
+                }),
+        [currentRun.data, graph, imageResources.errors, imageResources.resources],
+    );
     const activePreviewInputs = previewNodeId ? previewInputs(previewNodeId) : [];
 
-    const connectTo = (targetNodeId: string) => {
-        if (!connectionStart) return;
-        try {
-            const source = graph.nodes.find((node) => node.id === connectionStart.nodeId);
+    const validateConnection = useCallback(
+        (graph: WorkflowGraph, { sourceNodeId, sourceSlotId, targetNodeId }: { sourceNodeId: string; sourceSlotId: string; targetNodeId: string }) => {
+            const source = graph.nodes.find((node) => node.id === sourceNodeId);
             const target = graph.nodes.find((node) => node.id === targetNodeId);
-            const type = source ? workflowSourceType(source, connectionStart.slotId) : undefined;
-            if (type && target?.config?.providerId) {
-                const model = target.type === "image_generation" ? aiStatus?.imageModels?.find((item) => item.id === target.config?.providerId) : aiStatus?.videoModels?.find((item) => item.id === target.config?.providerId);
-                const currentCount = graph.connections.filter((item) => item.targetNodeId === target.id).map((item) => {
+            const type = source ? workflowSourceType(source, sourceSlotId) : undefined;
+            if (!type || !target?.config?.providerId) return;
+            const model = target.type === "image_generation" ? aiStatus?.imageModels?.find((item) => item.id === target.config?.providerId) : aiStatus?.videoModels?.find((item) => item.id === target.config?.providerId);
+            const currentCount = graph.connections
+                .filter((item) => item.targetNodeId === target.id)
+                .filter((item) => {
                     const input = graph.nodes.find((node) => node.id === item.sourceNodeId);
-                    return input ? workflowSourceType(input, item.sourceSlotId) : undefined;
-                }).filter((item) => item === type).length;
-                const limit = type === "image" ? model?.imageRequestSchema?.maxReferenceImages ?? model?.videoRequestSchema?.maxReferenceImages : type === "video" ? model?.videoRequestSchema?.maxReferenceVideos : undefined;
-                if (typeof limit === "number" && currentCount >= limit) throw new Error(`当前模型最多支持 ${limit} 个${type === "image" ? "图片" : "视频"}输入`);
-            }
-            setGraph(addWorkflowConnection(graph, { sourceNodeId: connectionStart.nodeId, sourceSlotId: connectionStart.slotId, targetNodeId }));
-            setConnectionStart(null);
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : "连线失败");
-        }
+                    return input && workflowSourceType(input, item.sourceSlotId) === type;
+                }).length;
+            const limit = type === "image" ? (model?.imageRequestSchema?.maxReferenceImages ?? model?.videoRequestSchema?.maxReferenceImages) : type === "video" ? model?.videoRequestSchema?.maxReferenceVideos : undefined;
+            if (typeof limit === "number" && currentCount >= limit) throw new Error(`当前模型最多支持 ${limit} 个${type === "image" ? "图片" : "视频"}输入`);
+        },
+        [graph, aiStatus],
+    );
+    const canvas = useWorkflowInteractions({
+        graph,
+        setGraph,
+        viewport,
+        screenToCanvas: screenToWorld,
+        pause: history.pause,
+        resume: history.resume,
+        onWarning: (text: string) => {
+            message.warning(text);
+        },
+        readOnly: editBlocked,
+        validateConnection,
+        makeNode,
+    });
+    const { interactions } = canvas;
+    const pendingSourceNode = interactions.pendingConnectionCreate ? canvas.nodes.find((item) => item.id === interactions.pendingConnectionCreate?.connection.nodeId) : undefined;
+    const connectionCreateOptions: [WorkflowNodeType, string][] =
+        interactions.pendingConnectionCreate?.connection.handleType === "source"
+            ? pendingSourceNode?.type === CanvasNodeType.Video
+                ? [["video_generation", "视频配置"]]
+                : [
+                      ["image_generation", "生图配置"],
+                      ["video_generation", "视频配置"],
+                  ]
+            : graph.nodes.find((node) => workflowVisualNodeId(node.id) === pendingSourceNode?.id)?.type === "image_generation"
+              ? [
+                    ["text_input", "文本"],
+                    ["image_input", "图片"],
+                ]
+              : [
+                    ["text_input", "文本"],
+                    ["image_input", "图片"],
+                    ["video_input", "视频"],
+                ];
+    const deselect = () => {
+        canvas.setSelectedNodeIds(new Set());
+        canvas.setSelectedConnectionId(null);
+        interactions.resetInteractionState();
     };
-
     const startNodeDrag = (event: ReactPointerEvent, node: WorkflowNode) => {
-        if (event.button !== 0 || (event.target as Element).closest("button,input,textarea,.ant-select")) return;
-        event.stopPropagation();
-        dragRef.current = { kind: "node", nodeId: node.id, startX: event.clientX, startY: event.clientY, position: node.position };
-        setSelection({ kind: "node", nodeId: node.id });
+        if (event.button !== 0 || (event.target as Element).closest("button,input,textarea,.ant-select,[contenteditable=true],[data-canvas-no-drag]")) return;
+        if (!editBlockedRef.current) interactions.handleNodeMouseDown(event, workflowVisualNodeId(node.id));
     };
-    const startOutputDrag = (event: ReactPointerEvent, parent: WorkflowNode, slot: WorkflowOutputSlot) => {
-        if (event.button !== 0 || (event.target as Element).closest("button")) return;
+    const startOutputDrag = (event: ReactPointerEvent, node: WorkflowNode, slot: WorkflowOutputSlot) => {
+        if (event.button !== 0 || (event.target as Element).closest("button,input,[data-canvas-no-drag]")) return;
+        if (!editBlockedRef.current) interactions.handleNodeMouseDown(event, workflowVisualOutputId(node.id, slot.id));
+    };
+    useEffect(() => {
+        autosave.update({ name, graph });
+        autosave.setEnabled(!readOnly && !interactions.isNodeDragging && !resizing && !pendingRunRequest);
+    }, [autosave, name, graph, readOnly, interactions.isNodeDragging, resizing, pendingRunRequest]);
+    const resizeSession = useRef<{ id: string; clientX: number; clientY: number; start: Parameters<typeof resizeCanvasNode>[0]; config: boolean } | null>(null);
+    const visualNodesRef = useRef(canvas.nodes);
+    visualNodesRef.current = canvas.nodes;
+    const startResize = (event: ReactPointerEvent, node: WorkflowNode, corner: CanvasResizeCorner, slot?: WorkflowOutputSlot) => {
+        if (editBlockedRef.current || event.button !== 0) return;
         event.stopPropagation();
-        dragRef.current = { kind: "output", nodeId: parent.id, slotId: slot.id, startX: event.clientX, startY: event.clientY, position: slot.position || parent.position };
-        setSelection({ kind: "output", nodeId: parent.id, slotId: slot.id });
+        event.preventDefault();
+        const id = slot ? workflowVisualOutputId(node.id, slot.id) : workflowVisualNodeId(node.id);
+        const visual = canvas.nodes.find((item) => item.id === id);
+        if (!visual) return;
+        const config = !slot && (node.type === "image_generation" || node.type === "video_generation");
+        resizeSession.current = {
+            id,
+            clientX: event.clientX,
+            clientY: event.clientY,
+            config,
+            start: { x: visual.position.x, y: visual.position.y, width: visual.width, height: visual.height, corner, keepRatio: !config && node.type !== "text_input", ratio: visual.width / visual.height },
+        };
+        canvas.setSelectedNodeIds(new Set([id]));
+        history.pause();
+        setResizing(true);
     };
     useEffect(() => {
         const move = (event: PointerEvent) => {
-            if (dragRef.current) {
-                const drag = dragRef.current;
-                const position = { x: drag.position.x + (event.clientX - drag.startX) / viewport.k, y: drag.position.y + (event.clientY - drag.startY) / viewport.k };
-                if (drag.kind === "node") updateNode(drag.nodeId, (node) => ({ ...node, position }));
-                else updateNode(drag.nodeId, (node) => ({ ...node, outputs: node.outputs?.map((slot) => slot.id === drag.slotId ? { ...slot, position } : slot) }));
-            } else if (panRef.current) {
-                setViewport({ ...panRef.current.viewport, x: panRef.current.viewport.x + event.clientX - panRef.current.x, y: panRef.current.viewport.y + event.clientY - panRef.current.y });
-            }
+            const resize = resizeSession.current;
+            if (!resize || editBlockedRef.current) return;
+            const next = resizeCanvasNode(resize.start, { x: (event.clientX - resize.clientX) / viewport.k, y: (event.clientY - resize.clientY) / viewport.k }, resize.config ? { width: 360, height: 260 } : undefined);
+            setGraph((current) =>
+                applyWorkflowVisualNodes(
+                    current,
+                    visualNodesRef.current.map((item) => (item.id === resize.id ? { ...item, ...next } : item)),
+                ),
+            );
         };
-        const stop = () => { dragRef.current = null; panRef.current = null; };
+        const finish = () => {
+            if (!resizeSession.current) return;
+            resizeSession.current = null;
+            setResizing(false);
+            history.resume();
+        };
         window.addEventListener("pointermove", move);
-        window.addEventListener("pointerup", stop);
-        window.addEventListener("blur", stop);
-        return () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); window.removeEventListener("blur", stop); };
-    }, [updateNode, viewport.k]);
-
-    const deleteSelection = useCallback(() => {
-        if (!selection) return;
-        try {
-            if (selection.kind === "node") setGraph((current) => removeWorkflowNode(current, selection.nodeId));
-            if (selection.kind === "output") setGraph((current) => removeWorkflowOutput(current, selection.nodeId, selection.slotId));
-            if (selection.kind === "connection") {
-                const connection = findWorkflowConnection(graph, selection);
-                if (connection) setGraph((current) => removeWorkflowConnection(current, connection));
-            }
-            setSelection(null);
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : "删除失败");
+        window.addEventListener("pointerup", finish);
+        window.addEventListener("pointercancel", finish);
+        window.addEventListener("blur", finish);
+        return () => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", finish);
+            window.removeEventListener("pointercancel", finish);
+            window.removeEventListener("blur", finish);
+        };
+    }, [viewport.k, history.resume]);
+    const changeMode = (node: WorkflowNode, mode: "image" | "video") => {
+        if (editBlockedRef.current || node.type === `${mode}_generation`) return;
+        if (graph.connections.some((edge) => edge.sourceNodeId === node.id)) {
+            message.warning("请先断开该配置输出的下游连线，再切换模式");
+            return;
         }
-    }, [graph.connections, message, selection]);
+        if (
+            mode === "image" &&
+            graph.connections.some((edge) => {
+                const source = graph.nodes.find((item) => item.id === edge.sourceNodeId);
+                return edge.targetNodeId === node.id && source && workflowSourceType(source, edge.sourceSlotId) === "video";
+            })
+        ) {
+            message.warning("请先断开视频输入，再切换生图模式");
+            return;
+        }
+        const config = aiStatus ? (mode === "image" ? reconcileProviderConfig(globalConfig, aiStatus) : reconcileVideoConfig(globalConfig, aiStatus)) : globalConfig;
+        updateNode(node.id, (current) => ({
+            ...current,
+            type: mode === "image" ? "image_generation" : "video_generation",
+            config: workflowConfigFromAiConfig(mode === "image" ? "image_generation" : "video_generation", config),
+            outputs: current.outputs?.map((slot) => ({ ...slot, type: mode })),
+        }));
+    };
+    const finishTitleEditing = () => {
+        if (!titleEditing) return;
+        const next = titleDraft.trim();
+        if (next) setName(next.slice(0, 128));
+        setTitleEditing(false);
+    };
+    const resetView = () => {
+        if (!canvas.nodes.length) {
+            setViewport(defaultWorkflowView.viewport);
+            return;
+        }
+        const left = Math.min(...canvas.nodes.map((node) => node.position.x));
+        const top = Math.min(...canvas.nodes.map((node) => node.position.y));
+        const right = Math.max(...canvas.nodes.map((node) => node.position.x + node.width));
+        const bottom = Math.max(...canvas.nodes.map((node) => node.position.y + node.height));
+        const k = Math.min(1, Math.max(0.05, Math.min((viewportSize.width - 160) / (right - left), (viewportSize.height - 200) / (bottom - top))));
+        setViewport({ x: (viewportSize.width - (right - left) * k) / 2 - left * k, y: (viewportSize.height - (bottom - top) * k) / 2 - top * k, k });
+    };
+    const retrySave = async () => {
+        if (saveState.status === "conflict") {
+            modal.confirm({ title: "流程已在其他页面更新", content: "重新加载后将检查本地草稿，可选择恢复草稿或使用远端版本。", okText: "重新加载", cancelText: "保留当前修改", onOk: async () => applyRemoteWorkflow(await fetchWorkflow(workflowId!)) });
+            return;
+        }
+        try {
+            await autosave.retry();
+        } catch {
+            /* Save state contains the actionable error. */
+        }
+    };
     useEffect(() => {
         const keydown = (event: KeyboardEvent) => {
-            if ((event.key === "Delete" || event.key === "Backspace") && !isEditableTarget(event.target)) deleteSelection();
-            if (event.key === "Escape") setConnectionStart(null);
+            if (isEditableTarget(event.target) || document.querySelector(".ant-modal-wrap:not([style*='display: none']),.ant-drawer-open")) return;
+            if (event.key === "Escape") {
+                deselect();
+                return;
+            }
+            if (editBlocked || interactions.isNodeDragging || resizing) return;
+            const modifier = event.metaKey || event.ctrlKey;
+            if (modifier && event.key.toLowerCase() === "s") {
+                event.preventDefault();
+                void retrySave();
+            } else if (modifier && event.key.toLowerCase() === "z") {
+                event.preventDefault();
+                event.shiftKey ? history.redo() : history.undo();
+            } else if (modifier && event.key.toLowerCase() === "y") {
+                event.preventDefault();
+                history.redo();
+            } else if (modifier && event.key.toLowerCase() === "c") {
+                if (canvas.copySelection()) event.preventDefault();
+            } else if (modifier && event.key.toLowerCase() === "v") {
+                if (canvas.pasteSelection()) event.preventDefault();
+            } else if (event.key === "Delete" || event.key === "Backspace") {
+                event.preventDefault();
+                canvas.deleteSelection();
+            }
         };
         window.addEventListener("keydown", keydown);
         return () => window.removeEventListener("keydown", keydown);
-    }, [deleteSelection]);
+    });
 
-    const navigateAway = (href: string) => {
-        if (!dirty) { router.push(href); return; }
-        modal.confirm({
-            title: "放弃未保存修改？",
-            content: "离开后，本次修改将不会保留。",
-            okText: "放弃修改",
-            okButtonProps: { danger: true },
-            cancelText: "继续编辑",
-            onOk: () => {
-                if (draftOwnerUID && workflowId) clearWorkflowDraft(window.sessionStorage, draftOwnerUID, workflowId);
-                router.push(href);
-            },
-        });
+    const navigateAway = async (href: string) => {
+        if (!readOnly && draftOwnerUID && workflowId && viewScope === JSON.stringify([draftOwnerUID, workflowId])) {
+            writeWorkflowView(window.localStorage, draftOwnerUID, workflowId, { viewport: canvasRef.current?.getViewport() || viewport, backgroundMode, showImageInfo });
+        }
+        if (!dirty || readOnly) {
+            router.push(href);
+            return;
+        }
+        try {
+            autosave.update(editorDocumentRef.current);
+            await autosave.flush();
+            router.push(href);
+        } catch {
+            modal.confirm({ title: "修改尚未保存", content: "本地草稿已保留。离开后可返回继续处理保存。", okText: "离开", cancelText: "继续编辑", onOk: () => router.push(href) });
+        }
     };
-    const leave = () => navigateAway(appPath("/workflows"));
+    const navigationRef = useRef(navigateAway);
+    navigationRef.current = navigateAway;
+    useEffect(() => editorNavigation?.register((href) => navigationRef.current(href)), [editorNavigation]);
+    const downloadImages = async () => {
+        if (!currentRun.data || downloadController.current) return;
+        const controller = new AbortController();
+        downloadController.current = controller;
+        setDownloading(true);
+        try {
+            const count = await downloadWorkflowImages(currentRun.data.run.id, controller.signal);
+            if (count) message.success(`已发起下载，共 ${count} 张图片`);
+        } catch (error) {
+            if (!controller.signal.aborted) message.error(error instanceof Error ? error.message : "发起下载失败");
+        } finally {
+            downloadController.current = null;
+            if (!controller.signal.aborted) setDownloading(false);
+        }
+    };
+    const leave = () => navigateAway(home.href);
     const latestRunSummary = latestWorkflowRun(workflowRuns.data?.items, workflowId);
     const runActive = isWorkflowRunActive(currentRun.data?.run.status || latestRunSummary?.status);
 
-    if (session.isPending || workflow.isPending || (!loadedRef.current && (session.isFetching || workflow.isFetching))) return <div className="flex h-full items-center justify-center"><Spin /></div>;
-    if (session.isError || workflow.isError || !workflow.data) return <div className="flex h-full flex-col items-center justify-center gap-4 text-sm text-stone-500"><span>{workflow.error instanceof Error ? workflow.error.message : session.error instanceof Error ? session.error.message : "流程加载失败"}</span><Button onClick={() => void Promise.all([session.refetch(), workflow.refetch()])}>重新加载</Button></div>;
+    if (session.isPending || workflow.isPending || (!loadedRef.current && (session.isFetching || workflow.isFetching)))
+        return (
+            <div className="flex h-full items-center justify-center">
+                <Spin />
+            </div>
+        );
+    if (session.isError || workflow.isError || !workflow.data)
+        return (
+            <div className="flex h-full flex-col items-center justify-center gap-4 text-sm text-stone-500">
+                <span>{workflow.error instanceof Error ? workflow.error.message : session.error instanceof Error ? session.error.message : "流程加载失败"}</span>
+                <Button onClick={() => void Promise.all([session.refetch(), workflow.refetch()])}>重新加载</Button>
+            </div>
+        );
 
     return (
-        <ScopedVideoResourceProvider scope={`workflow:${workflowId}:run:${currentRun.data?.run.id || "definition"}`} nodeIds={[
-            ...graph.nodes.filter((node) => node.type === "video_input").map((node) => node.id),
-            ...graph.nodes.flatMap((node) => (node.outputs || []).flatMap((slot) => slot.type === "video" && currentRun.data && findWorkflowOutput(currentRun.data.outputs, node.id, slot.id)?.mediaId ? [workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id)] : [])),
-            ...activePreviewInputs.filter((input) => input.type === "video" && input.mediaId).map((input) => `preview-${input.sourceNodeId}-${input.key}`),
-        ]}>
-        <main className="relative flex h-full min-h-0 flex-col overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
-            <header className="relative z-50 flex h-14 shrink-0 items-center gap-3 border-b px-3" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }}>
-                <Button type="text" shape="circle" icon={<ArrowLeft className="size-4" />} onClick={leave} aria-label="返回流程库" />
-                <Input value={name} maxLength={128} aria-label="流程名称" className="!w-52" onChange={(event) => setName(event.target.value)} />
-                <span className="text-xs opacity-50">{dirty ? "未保存" : `已保存 · v${revision}`}</span>
-                <div className="ml-auto flex items-center gap-2">
-                    <Button type="text" icon={<Clock3 className="size-4" />} onClick={() => navigateAway(appPath("/workflow-runs"))}>运行记录</Button>
-                    {currentRun.data ? <Button type="text" loading={currentRun.isFetching && !runActive} onClick={() => setRunDetailOpen(true)}>{workflowRunStatusText(currentRun.data.run.status)} · v{currentRun.data.run.revision}</Button> : null}
-                    {runActive && currentRun.data && !currentRun.data.run.stopRequested ? <Button danger icon={<Square className="size-4" />} loading={stopRun.isPending} onClick={() => stopRun.mutate(currentRun.data.run.id)}>停止</Button> : null}
-                    <Button icon={<Play className="size-4" />} disabled={runActive || save.isPending || (!pendingRunRequest && dirty)} loading={createRun.isPending} title={pendingRunRequest ? "使用同一请求 ID 确认上次运行" : dirty ? "请先保存当前修改" : runActive ? "当前运行结束后可再次运行" : undefined} onClick={startRun}>{pendingRunRequest ? "确认上次运行" : "运行"}</Button>
-                    <Button type="primary" icon={<Save className="size-4" />} disabled={!dirty || !name.trim() || Boolean(pendingRunRequest)} loading={save.isPending} title={pendingRunRequest ? "请先确认上次运行请求" : undefined} onClick={() => save.mutate({ revision, name: name.trim(), graph, editorSnapshot: currentSnapshot })}>保存</Button>
-                    <AppActions variant="canvas" onOpenSettings={() => navigateAway(appPath("/admin/settings"))} />
-                </div>
-            </header>
-            <div className="relative min-h-0 flex-1">
-                <div className="absolute left-3 top-3 z-40 flex flex-wrap items-center gap-1.5 rounded-xl border p-1.5 shadow-sm backdrop-blur" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }}>
-                    <ToolButton icon={<Type />} label="文本" onClick={() => addNode("text_input")} />
-                    <ToolButton icon={<ImageIcon />} label="图片" onClick={() => { setMediaTarget({ type: "image" }); setAssetPickerOpen(true); }} />
-                    <ToolButton icon={<Video />} label="视频" onClick={() => chooseMedia(undefined, "video")} />
-                    <span className="mx-0.5 h-5 w-px" style={{ background: theme.toolbar.border }} />
-                    <ToolButton icon={<WandSparkles />} label="生图" onClick={() => addNode("image_generation")} />
-                    <ToolButton icon={<Clapperboard />} label="视频生成" onClick={() => addNode("video_generation")} />
-                    <ToolButton icon={<Images />} label="我的素材" onClick={() => { setMediaTarget({ type: "image" }); setAssetPickerOpen(true); }} />
-                </div>
-                <div className="absolute bottom-3 right-3 z-40 flex items-center gap-1 rounded-xl border p-1 shadow-sm" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }}>
-                    <Button type="text" size="small" shape="circle" icon={<ZoomOut className="size-4" />} onClick={() => setViewport((current) => ({ ...current, k: Math.max(0.2, current.k / 1.15) }))} aria-label="缩小" />
-                    <span className="w-11 text-center text-xs tabular-nums">{Math.round(viewport.k * 100)}%</span>
-                    <Button type="text" size="small" shape="circle" icon={<ZoomIn className="size-4" />} onClick={() => setViewport((current) => ({ ...current, k: Math.min(2, current.k * 1.15) }))} aria-label="放大" />
-                    <Button type="text" size="small" shape="circle" icon={<LocateFixed className="size-4" />} onClick={() => setViewport({ x: 80, y: 80, k: 0.8 })} aria-label="复位视图" />
-                </div>
-                <div
-                    ref={attachCanvasElement}
-                    className="relative h-full w-full cursor-grab select-none overflow-hidden"
-                    style={{ backgroundImage: `linear-gradient(${theme.canvas.line} 1px, transparent 1px),linear-gradient(90deg,${theme.canvas.line} 1px,transparent 1px)`, backgroundSize: `${48 * viewport.k}px ${48 * viewport.k}px`, backgroundPosition: `${viewport.x % (48 * viewport.k)}px ${viewport.y % (48 * viewport.k)}px` }}
-                    onPointerDown={(event) => {
-                        if (event.button !== 0 || (event.target as Element).closest("[data-workflow-object],button,input,textarea")) return;
-                        panRef.current = { x: event.clientX, y: event.clientY, viewport };
-                        setSelection(null);
-                        setConnectionStart(null);
+        <ScopedVideoResourceProvider
+            scope={`workflow:${workflowId}:run:${currentRun.data?.run.id || "definition"}`}
+            nodeIds={[
+                ...graph.nodes.filter((node) => node.type === "video_input").map((node) => node.id),
+                ...graph.nodes.flatMap((node) =>
+                    (node.outputs || []).flatMap((slot) =>
+                        slot.type === "video" && currentRun.data && findCompatibleWorkflowOutput(currentRun.data, graph, node.id, slot.id)?.mediaId ? [workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id)] : [],
+                    ),
+                ),
+                ...activePreviewInputs.filter((input) => input.type === "video" && input.mediaId).map((input) => `preview-${input.sourceNodeId}-${input.key}`),
+            ]}
+        >
+            <main className="relative flex h-full min-h-0 flex-col overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
+                <CanvasEditorTopBar
+                    title={name}
+                    titleDraft={titleDraft}
+                    editing={titleEditing}
+                    onDraftChange={setTitleDraft}
+                    onStartEditing={() => {
+                        if (!editBlocked) {
+                            setTitleDraft(name);
+                            setTitleEditing(true);
+                        }
                     }}
-                    onPointerMove={(event) => {
-                        if (connectionStart) setMouseWorld(screenToWorld(event.clientX, event.clientY));
+                    onFinishEditing={finishTitleEditing}
+                    onCancelEditing={() => setTitleEditing(false)}
+                    menuLabel="打开流程菜单"
+                    titleHint="双击修改流程名称"
+                    menu={{
+                        items: [
+                            { key: "library", label: "我的流程", onClick: leave },
+                            { type: "divider" },
+                            { key: "undo", label: "撤销", disabled: readOnly || !history.canUndo, onClick: history.undo },
+                            { key: "redo", label: "重做", disabled: readOnly || !history.canRedo, onClick: history.redo },
+                            { key: "save", label: saveState.status === "conflict" ? "处理保存冲突" : "立即保存", disabled: readOnly || Boolean(pendingRunRequest), onClick: () => void retrySave() },
+                        ],
                     }}
-                    onWheel={(event) => {
-                        event.preventDefault();
-                        const rect = containerRef.current?.getBoundingClientRect();
-                        if (!rect) return;
-                        const mouseX = event.clientX - rect.left;
-                        const mouseY = event.clientY - rect.top;
-                        const worldX = (mouseX - viewport.x) / viewport.k;
-                        const worldY = (mouseY - viewport.y) / viewport.k;
-                        const k = Math.max(0.2, Math.min(2, viewport.k * Math.exp(-event.deltaY * 0.001)));
-                        setViewport({ x: mouseX - worldX * k, y: mouseY - worldY * k, k });
-                    }}
-                >
-                    <div className="absolute origin-top-left" style={{ transform: `translate(${viewport.x}px,${viewport.y}px) scale(${viewport.k})` }}>
-                        <WorkflowConnections graph={graph} selection={selection} connectionStart={connectionStart} mouseWorld={mouseWorld} onSelect={(identity) => setSelection({ kind: "connection", ...identity })} />
+                    status={<EditorSyncStatus
+                        kind={readOnly ? "blocked" : saveState.status === "conflict" ? "conflict" : saveState.status === "error" ? "error" : saveState.status === "saving" || dirty ? "saving" : "saved"}
+                        label={readOnly ? lease.status === "readonly" ? "另一标签页正在编辑" : lease.status === "error" ? "编辑权限检查失败" : "正在获取编辑权限" : saveState.status === "conflict" ? "版本冲突" : saveState.status === "error" ? "保存失败" : saveState.status === "saving" || dirty ? "保存中" : "已保存"}
+                        detail={`流程版本 v${revision}`}
+                        action={!readOnly && (saveState.status === "conflict" || saveState.status === "error") ? { label: saveState.status === "conflict" ? "处理冲突" : "重试", onClick: () => void retrySave() } : undefined}
+                    />}
+                    actions={
+                        <>
+                            <Button type="text" icon={<Download className="size-4" />} loading={downloading} disabled={!workflowDownloadImageCount(currentRun.data)} onClick={() => void downloadImages()}>
+                                下载
+                            </Button>
+                            {currentRun.data ? (
+                                <Button type="text" onClick={() => setRunDetailOpen(true)}>
+                                    {workflowRunStatusText(currentRun.data.run.status)}
+                                </Button>
+                            ) : null}
+                            {runActive && currentRun.data && !currentRun.data.run.stopRequested ? (
+                                <Button danger icon={<Square className="size-4" />} loading={stopRun.isPending} onClick={() => stopRun.mutate(currentRun.data.run.id)}>
+                                    停止
+                                </Button>
+                            ) : null}
+                            <Button icon={<Play className="size-4" />} disabled={readOnly || runActive || resizing || interactions.isNodeDragging} loading={starting || createRun.isPending} onClick={() => void startRun()}>
+                                {pendingRunRequest ? "确认上次运行" : "运行"}
+                            </Button>
+                        </>
+                    }
+                />
+                <div className="relative min-h-0 flex-1">
+                    <InfiniteCanvas
+                        ref={canvasRef}
+                        containerRef={containerRef}
+                        viewport={viewport}
+                        backgroundMode={backgroundMode}
+                        onViewportChange={setViewport}
+                        onCanvasMouseDown={readOnly ? undefined : interactions.handleCanvasMouseDown}
+                        onCanvasDeselect={deselect}
+                        onContextMenu={(event) => event.preventDefault()}
+                    >
+                        <svg className="pointer-events-none absolute left-0 top-0 h-[10000px] w-[10000px] overflow-visible">
+                            {canvas.connections.map((connection) => {
+                                const from = canvas.nodes.find((node) => node.id === connection.fromNodeId);
+                                const to = canvas.nodes.find((node) => node.id === connection.toNodeId);
+                                return from && to ? (
+                                    <ConnectionPath
+                                        key={connection.id}
+                                        connection={connection}
+                                        from={from}
+                                        to={to}
+                                        active={canvas.selectedConnectionId === connection.id}
+                                        pendingCut={interactions.cutConnectionState?.connectionIds.has(connection.id)}
+                                        onSelect={(id) => {
+                                            canvas.setSelectedConnectionId(id);
+                                            canvas.setSelectedNodeIds(new Set());
+                                        }}
+                                    />
+                                ) : null;
+                            })}
+                            {graph.nodes.flatMap((node) =>
+                                (node.outputs || []).map((slot) => {
+                                    const from = canvas.nodes.find((item) => item.id === workflowVisualNodeId(node.id));
+                                    const to = canvas.nodes.find((item) => item.id === workflowVisualOutputId(node.id, slot.id));
+                                    return from && to ? (
+                                        <path
+                                            key={workflowVisualOutputId(node.id, slot.id)}
+                                            d={`M ${from.position.x + from.width} ${from.position.y + from.height / 2} C ${from.position.x + from.width + 48} ${from.position.y + from.height / 2}, ${to.position.x - 48} ${to.position.y + to.height / 2}, ${to.position.x} ${to.position.y + to.height / 2}`}
+                                            fill="none"
+                                            stroke={theme.node.muted}
+                                            strokeWidth="2"
+                                            strokeOpacity=".55"
+                                        />
+                                    ) : null;
+                                }),
+                            )}
+                            {interactions.connectingParams ? <ActiveConnectionPath node={canvas.nodes.find((node) => node.id === interactions.connectingParams?.nodeId)} handle={interactions.connectingParams} mouseWorld={interactions.mouseWorld} /> : null}
+                            {interactions.cutConnectionState ? <polyline points={interactions.cutConnectionState.points.map((point) => `${point.x},${point.y}`).join(" ")} fill="none" stroke={theme.node.activeStroke} strokeWidth="2" /> : null}
+                        </svg>
                         {graph.nodes.map((node) => (
                             <WorkflowNodeCard
                                 key={node.id}
                                 node={node}
-                                selected={selection?.kind === "node" && selection.nodeId === node.id}
-                                connecting={Boolean(connectionStart)}
+                                selected={canvas.selectedNodeIds.has(workflowVisualNodeId(node.id))}
+                                canvasNodeId={workflowVisualNodeId(node.id)}
+                                viewport={viewport}
+                                readOnly={editBlocked}
+                                onLayoutHeightChange={(height) => {
+                                    if (height > (node.height || 240)) updateNode(node.id, (current) => ({ ...current, height }));
+                                }}
+                                onResizeStart={startResize}
+                                onModeChange={(mode) => changeMode(node, mode)}
+                                onPreviewMedia={() => setMediaPreview({ node })}
+                                connecting={Boolean(interactions.connectingParams)}
                                 videoVisible={isCanvasNodeNearViewport({ id: node.id, type: CanvasNodeType.Video, title: "", position: node.position, width: node.width || 420, height: node.height || 236 } satisfies CanvasNodeData, viewport, viewportSize)}
                                 inputs={previewInputs(node.id)}
                                 imageUrl={imageResources.resources.get(node.id)?.url}
@@ -589,130 +1035,308 @@ export function WorkflowEditor() {
                                 imageError={imageResources.errors.get(node.id)}
                                 onRetryImage={() => imageResources.retry(node.id)}
                                 onImageLoaded={(storageKey) => imageResources.acknowledgeRendered(node.id, storageKey)}
-                                onSelect={() => setSelection({ kind: "node", nodeId: node.id })}
+                                onImageDimensions={(dimensions) => node.mediaId && fitLoadedImage(node.id, node.mediaId, dimensions)}
+                                onSelect={() => canvas.setSelectedNodeIds(new Set([workflowVisualNodeId(node.id)]))}
                                 onDragStart={startNodeDrag}
-                                onRemove={() => setGraph((current) => removeWorkflowNode(current, node.id))}
+                                onRemove={() => {
+                                    if (!editBlockedRef.current) setGraph((current) => removeWorkflowNode(current, node.id));
+                                }}
                                 onChooseMedia={() => chooseMedia(node.id, node.type === "video_input" ? "video" : "image")}
                                 onTextChange={(text) => updateNode(node.id, (current) => ({ ...current, text }))}
                                 onConfigChange={(config) => updateNode(node.id, (current) => ({ ...current, config }))}
                                 onOutputCountChange={(count) => changeOutputCount(node.id, count)}
                                 onPreview={() => setPreviewNodeId(node.id)}
-                                onConnectTarget={() => connectTo(node.id)}
-                                onStartSource={() => setConnectionStart({ nodeId: node.id, slotId: "output" })}
-                            />
-                        ))}
-                        {graph.nodes.flatMap((node) => (node.outputs || []).map((slot) => (
-                            <WorkflowOutputCard
-                                key={workflowOutputKey(node.id, slot.id)}
-                                parent={node}
-                                slot={slot}
-                                execution={currentRun.data ? findWorkflowOutput(currentRun.data.outputs, node.id, slot.id) : undefined}
-                                resourceNodeId={currentRun.data ? workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id) : undefined}
-                                videoVisible={isCanvasNodeNearViewport({ id: workflowOutputKey(node.id, slot.id), type: CanvasNodeType.Video, title: "", position: slot.position || node.position, width: slot.width || 420, height: slot.height || 236 } satisfies CanvasNodeData, viewport, viewportSize)}
-                                imageUrl={currentRun.data ? imageResources.resources.get(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id))?.url : undefined}
-                                imageStorageKey={currentRun.data ? imageResources.resources.get(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id))?.storageKey : undefined}
-                                imageError={currentRun.data ? imageResources.errors.get(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id)) : undefined}
-                                retrying={retryOutput.isPending && retryOutput.variables?.nodeId === node.id && retryOutput.variables.slotId === slot.id}
-                                confirmingRetry={Boolean(currentRun.data && pendingRetryRequests[pendingWorkflowRetryKey({ runId: currentRun.data.run.id, nodeId: node.id, slotId: slot.id })])}
-                                onReloadMedia={currentRun.data ? () => imageResources.retry(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id)) : undefined}
-                                onRetryOutput={currentRun.data && isRetryableImageOutput(slot, findWorkflowOutput(currentRun.data.outputs, node.id, slot.id), currentRun.data.run) ? () => startOutputRetry(node.id, slot.id) : undefined}
-                                onImageLoaded={(storageKey) => currentRun.data && imageResources.acknowledgeRendered(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id), storageKey)}
-                                selected={selection?.kind === "output" && selection.nodeId === node.id && selection.slotId === slot.id}
-                                onSelect={() => setSelection({ kind: "output", nodeId: node.id, slotId: slot.id })}
-                                onDragStart={startOutputDrag}
-                                onRemove={() => {
-                                    try { setGraph(removeWorkflowOutput(graph, node.id, slot.id)); }
-                                    catch (error) { message.error(error instanceof Error ? error.message : "无法删除输出"); }
+                                onConnectTarget={(event) => {
+                                    if (event && !editBlocked) interactions.handleConnectStart(event, workflowVisualNodeId(node.id), "target");
                                 }}
-                                onStartSource={() => setConnectionStart({ nodeId: node.id, slotId: slot.id })}
+                                onStartSource={(event) => {
+                                    if (event && !editBlocked) interactions.handleConnectStart(event, workflowVisualNodeId(node.id), "source");
+                                }}
                             />
-                        )))}
-                    </div>
-                </div>
-            </div>
-            <input ref={imageInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadImage(file); event.target.value = ""; }} />
-            <input ref={videoInputRef} type="file" accept="video/mp4" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadVideo(file); event.target.value = ""; }} />
-            <Modal title={mediaTarget?.type === "video" ? "选择视频" : "选择图片"} open={assetPickerOpen} footer={<Button icon={mediaTarget?.type === "video" ? <Video className="size-4" /> : <ImageIcon className="size-4" />} loading={uploading} onClick={() => mediaTarget?.type === "video" ? videoInputRef.current?.click() : imageInputRef.current?.click()}>上传{mediaTarget?.type === "video" ? "视频" : "图片"}</Button>} onCancel={() => { setAssetPickerOpen(false); setMediaTarget(undefined); }} width={760} destroyOnHidden>
-                {mediaTarget?.type === "video" ? workflowVideos.isPending ? <div className="flex min-h-48 items-center justify-center"><Spin /></div> : workflowVideos.isError ? <Empty description={workflowVideos.error instanceof Error ? workflowVideos.error.message : "视频素材加载失败"}><Button onClick={() => void workflowVideos.refetch()}>重新加载</Button></Empty> : workflowVideos.data.items.length ? (
-                    <div className="grid max-h-[55vh] grid-cols-3 gap-3 overflow-auto sm:grid-cols-4">
-                        {workflowVideos.data.items.map((video) => <button key={video.id} type="button" className="overflow-hidden rounded-xl border border-stone-200 text-left dark:border-stone-700" onClick={() => selectAsset(video.id)}><span className="flex aspect-[4/3] items-center justify-center bg-black text-white"><Video className="size-7" /></span><span className="block truncate px-2 pt-1.5 text-xs">{video.title || video.filename || "视频素材"}</span><span className="block px-2 pb-1.5 text-[11px] text-stone-500">{video.duration > 0 ? `${video.duration.toFixed(1)} 秒` : "视频"}</span></button>)}
-                    </div>
-                ) : <Empty description="暂无可用视频素材" /> : (
-                    <div className="grid max-h-[55vh] grid-cols-3 gap-3 overflow-auto sm:grid-cols-4">
-                        {assets.flatMap((asset) => asset.kind === "image" && typeof asset.metadata?.mediaId === "string" ? [<button key={asset.id} type="button" className="overflow-hidden rounded-xl border border-stone-200 text-left dark:border-stone-700" onClick={() => selectAsset(asset.metadata!.mediaId as string)}><img src={asset.coverUrl} alt="" className="aspect-[4/3] w-full object-cover" /><span className="block truncate px-2 py-1.5 text-xs">{asset.title}</span></button>] : [])}
-                    </div>
-                )}
-            </Modal>
-            <Modal title="输入预览" open={Boolean(previewNodeId)} footer={null} width={760} onCancel={() => setPreviewNodeId(undefined)} destroyOnHidden>
-                {activePreviewInputs.length ? (
-                    <div className="grid max-h-[60vh] grid-cols-2 gap-3 overflow-auto sm:grid-cols-3">
-                        {activePreviewInputs.map((input) => (
-                            <div key={input.key} className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-50 dark:border-stone-700 dark:bg-stone-900">
-                                {input.type === "text" ? <div className="h-full overflow-auto whitespace-pre-wrap p-3 text-xs leading-5">{input.text || "空文本"}</div> : input.mediaId ? <WorkflowMediaPreview nodeId={`preview-${input.sourceNodeId}-${input.key}`} type={input.type} mediaId={input.mediaId} imageUrl={input.imageUrl} imageStorageKey={input.imageStorageKey} imageError={input.imageError} /> : <div className="flex h-full flex-col items-center justify-center gap-2 text-xs text-stone-400">{input.type === "image" ? <ImageIcon className="size-6" /> : <Video className="size-6" />}运行后显示</div>}
-                            </div>
                         ))}
-                    </div>
-                ) : <div className="py-12 text-center text-sm text-stone-500">暂无输入</div>}
-            </Modal>
-            <Drawer title="本次运行" open={runDetailOpen} width="min(920px, 94vw)" destroyOnHidden onClose={() => setRunDetailOpen(false)}>
-                {currentRun.isError ? <Empty description={currentRun.error instanceof Error ? currentRun.error.message : "运行详情加载失败"}><Button onClick={() => void currentRun.refetch()}>重新加载</Button></Empty> : (
-                    <WorkflowRunDetail
-                        detail={currentRun.data}
-                        stopping={stopRun.isPending}
-                        retryingKey={retryOutput.isPending && retryOutput.variables ? workflowOutputKey(retryOutput.variables.nodeId, retryOutput.variables.slotId) : undefined}
-                        confirmingRetryKeys={new Set(Object.values(pendingRetryRequests).filter((request) => request.runId === currentRun.data?.run.id).map((request) => workflowOutputKey(request.nodeId, request.slotId)))}
-                        onStop={currentRun.data ? () => stopRun.mutate(currentRun.data.run.id) : undefined}
-                        onRetry={currentRun.data ? startOutputRetry : undefined}
+                        {graph.nodes.flatMap((node) =>
+                            (node.outputs || []).map((slot) => (
+                                <WorkflowOutputCard
+                                    key={workflowOutputKey(node.id, slot.id)}
+                                    parent={node}
+                                    slot={slot}
+                                    execution={currentRun.data ? findCompatibleWorkflowOutput(currentRun.data, graph, node.id, slot.id) : undefined}
+                                    resourceNodeId={currentRun.data ? workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id) : undefined}
+                                    videoVisible={isCanvasNodeNearViewport(
+                                        { id: workflowOutputKey(node.id, slot.id), type: CanvasNodeType.Video, title: "", position: slot.position || node.position, width: slot.width || 420, height: slot.height || 236 } satisfies CanvasNodeData,
+                                        viewport,
+                                        viewportSize,
+                                    )}
+                                    imageUrl={currentRun.data ? imageResources.resources.get(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id))?.url : undefined}
+                                    imageStorageKey={currentRun.data ? imageResources.resources.get(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id))?.storageKey : undefined}
+                                    imageError={currentRun.data ? imageResources.errors.get(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id)) : undefined}
+                                    retrying={retryOutput.isPending && retryOutput.variables?.nodeId === node.id && retryOutput.variables.slotId === slot.id}
+                                    confirmingRetry={Boolean(currentRun.data && pendingRetryRequests[pendingWorkflowRetryKey({ runId: currentRun.data.run.id, nodeId: node.id, slotId: slot.id })])}
+                                    onReloadMedia={currentRun.data ? () => imageResources.retry(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id)) : undefined}
+                                    onRetryOutput={currentRun.data && isRetryableImageOutput(slot, findCompatibleWorkflowOutput(currentRun.data, graph, node.id, slot.id), currentRun.data.run) ? () => startOutputRetry(node.id, slot.id) : undefined}
+                                    onImageLoaded={(storageKey) => currentRun.data && imageResources.acknowledgeRendered(workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id), storageKey)}
+                                    onImageDimensions={(dimensions) => {
+                                        const output = currentRun.data && findCompatibleWorkflowOutput(currentRun.data, graph, node.id, slot.id);
+                                        if (output?.mediaId) fitLoadedImage(node.id, output.mediaId, dimensions, slot.id);
+                                    }}
+                                    selected={canvas.selectedNodeIds.has(workflowVisualOutputId(node.id, slot.id))}
+                                    canvasNodeId={workflowVisualOutputId(node.id, slot.id)}
+                                    viewport={viewport}
+                                    readOnly={editBlocked}
+                                    onResizeStart={startResize}
+                                    onPreviewMedia={() => setMediaPreview({ node, slot })}
+                                    onSelect={() => canvas.setSelectedNodeIds(new Set([workflowVisualOutputId(node.id, slot.id)]))}
+                                    onDragStart={startOutputDrag}
+                                    onRemove={() => {
+                                        if (editBlockedRef.current) return;
+                                        try {
+                                            setGraph(removeWorkflowOutput(graph, node.id, slot.id));
+                                        } catch (error) {
+                                            message.error(error instanceof Error ? error.message : "无法删除输出");
+                                        }
+                                    }}
+                                    onStartSource={(event) => {
+                                        if (event && !editBlocked) interactions.handleConnectStart(event, workflowVisualOutputId(node.id, slot.id), "source");
+                                    }}
+                                />
+                            )),
+                        )}
+                        {interactions.selectionBox ? (
+                            <div
+                                className="pointer-events-none absolute z-[100] border"
+                                style={{
+                                    left: Math.min(interactions.selectionBox.startWorldX, interactions.selectionBox.currentWorldX),
+                                    top: Math.min(interactions.selectionBox.startWorldY, interactions.selectionBox.currentWorldY),
+                                    width: Math.abs(interactions.selectionBox.currentWorldX - interactions.selectionBox.startWorldX),
+                                    height: Math.abs(interactions.selectionBox.currentWorldY - interactions.selectionBox.startWorldY),
+                                    borderColor: theme.canvas.selectionStroke,
+                                    background: theme.canvas.selectionFill,
+                                }}
+                            />
+                        ) : null}
+                        {interactions.pendingConnectionCreate ? (
+                            <div
+                                data-connection-create-menu
+                                className="absolute z-[120] w-56 rounded-2xl border p-3 shadow-xl"
+                                style={{ left: interactions.pendingConnectionCreate.position.x, top: interactions.pendingConnectionCreate.position.y, background: theme.node.panel, borderColor: theme.node.stroke }}
+                            >
+                                <div className="mb-2 flex justify-between text-sm">
+                                    <span>连接并创建</span>
+                                    <button onClick={interactions.cancelPendingConnectionCreate} aria-label="关闭连接菜单">
+                                        ×
+                                    </button>
+                                </div>
+                                {connectionCreateOptions.map(([type, label]) => (
+                                    <Button key={type} type="text" block onClick={() => canvas.createConnectedNode(type as WorkflowNodeType)}>
+                                        {label}
+                                    </Button>
+                                ))}
+                            </div>
+                        ) : null}
+                    </InfiniteCanvas>
+                    {readOnly ? <div className="pointer-events-none absolute inset-x-0 bottom-24 z-40 text-center text-xs opacity-60">{lease.status === "readonly" ? "当前流程由另一标签页编辑" : "正在确认编辑权限"}</div> : null}
+                    <CanvasToolbar
+                        homeLabel={home.label}
+                        onHome={leave}
+                        selectedCount={canvas.selectedNodeIds.size + (canvas.selectedConnectionId ? 1 : 0)}
+                        canUndo={!editBlocked && history.canUndo}
+                        canRedo={!editBlocked && history.canRedo}
+                        backgroundMode={backgroundMode}
+                        showImageInfo={showImageInfo}
+                        onAddText={() => {
+                            if (!editBlocked) addNode("text_input");
+                        }}
+                        onAddImage={() => {
+                            if (!editBlocked) chooseMedia(undefined, "image");
+                        }}
+                        onAddVideo={() => {
+                            if (!editBlocked) chooseMedia(undefined, "video");
+                        }}
+                        onAddConfig={() => {
+                            if (!editBlocked) addNode("image_generation");
+                        }}
+                        onUndo={() => {
+                            if (!editBlocked) history.undo();
+                        }}
+                        onRedo={() => {
+                            if (!editBlocked) history.redo();
+                        }}
+                        onUpload={() => {
+                            if (!editBlocked) imageInputRef.current?.click();
+                        }}
+                        onDelete={canvas.deleteSelection}
+                        onClear={() => {
+                            if (!editBlocked)
+                                modal.confirm({
+                                    title: "清空当前流程？",
+                                    content: "可以通过撤销恢复。",
+                                    okText: "清空",
+                                    cancelText: "取消",
+                                    onOk: () => {
+                                        setGraph(emptyWorkflowGraph());
+                                        deselect();
+                                    },
+                                });
+                        }}
+                        onDeselect={deselect}
+                        onBackgroundModeChange={setBackgroundMode}
                     />
-                )}
-            </Drawer>
-        </main>
+                    <CanvasZoomControls
+                        scale={viewport.k}
+                        onScaleChange={(k) => setViewport((current) => ({ x: viewportSize.width / 2 - ((viewportSize.width / 2 - current.x) * k) / current.k, y: viewportSize.height / 2 - ((viewportSize.height / 2 - current.y) * k) / current.k, k }))}
+                        onReset={resetView}
+                        isMiniMapOpen={miniMapOpen}
+                        onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
+                    />
+                    {miniMapOpen ? <Minimap nodes={canvas.nodes} viewport={viewport} viewportSize={viewportSize} onViewportChange={setViewport} /> : null}
+                </div>
+                <input
+                    ref={imageInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) void uploadImage(file);
+                        event.target.value = "";
+                    }}
+                />
+                <input
+                    ref={videoInputRef}
+                    type="file"
+                    accept="video/mp4"
+                    className="hidden"
+                    onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) void uploadVideo(file);
+                        event.target.value = "";
+                    }}
+                />
+                <Modal
+                    title={mediaTarget?.type === "video" ? "选择视频" : "选择图片"}
+                    open={assetPickerOpen}
+                    footer={
+                        <Button
+                            icon={mediaTarget?.type === "video" ? <Video className="size-4" /> : <ImageIcon className="size-4" />}
+                            loading={uploading}
+                            onClick={() => (mediaTarget?.type === "video" ? videoInputRef.current?.click() : imageInputRef.current?.click())}
+                        >
+                            上传{mediaTarget?.type === "video" ? "视频" : "图片"}
+                        </Button>
+                    }
+                    onCancel={() => {
+                        setAssetPickerOpen(false);
+                        setMediaTarget(undefined);
+                    }}
+                    width={760}
+                    destroyOnHidden
+                >
+                    {mediaTarget?.type === "video" ? (
+                        workflowVideos.isPending ? (
+                            <div className="flex min-h-48 items-center justify-center">
+                                <Spin />
+                            </div>
+                        ) : workflowVideos.isError ? (
+                            <Empty description={workflowVideos.error instanceof Error ? workflowVideos.error.message : "视频素材加载失败"}>
+                                <Button onClick={() => void workflowVideos.refetch()}>重新加载</Button>
+                            </Empty>
+                        ) : workflowVideos.data.items.length ? (
+                            <div className="grid max-h-[55vh] grid-cols-3 gap-3 overflow-auto sm:grid-cols-4">
+                                {workflowVideos.data.items.map((video) => (
+                                    <button key={video.id} type="button" className="overflow-hidden rounded-xl border border-stone-200 text-left dark:border-stone-700" onClick={() => selectAsset(video.id)}>
+                                        <span className="flex aspect-[4/3] items-center justify-center bg-black text-white">
+                                            <Video className="size-7" />
+                                        </span>
+                                        <span className="block truncate px-2 pt-1.5 text-xs">{video.title || video.filename || "视频素材"}</span>
+                                        <span className="block px-2 pb-1.5 text-[11px] text-stone-500">{video.duration > 0 ? `${video.duration.toFixed(1)} 秒` : "视频"}</span>
+                                    </button>
+                                ))}
+                            </div>
+                        ) : (
+                            <Empty description="暂无可用视频素材" />
+                        )
+                    ) : (
+                        <div className="grid max-h-[55vh] grid-cols-3 gap-3 overflow-auto sm:grid-cols-4">
+                            {assets.flatMap((asset) =>
+                                asset.kind === "image" && typeof asset.metadata?.mediaId === "string"
+                                    ? [<WorkflowImageAssetCard key={asset.id} mediaId={asset.metadata!.mediaId as string} title={asset.title} onSelect={() => selectAsset(asset.metadata!.mediaId as string)} />]
+                                    : [],
+                            )}
+                        </div>
+                    )}
+                </Modal>
+                <Modal title="预览" open={Boolean(mediaPreview)} footer={null} width={900} onCancel={() => setMediaPreview(undefined)} destroyOnHidden>
+                    {mediaPreview
+                        ? (() => {
+                              const { node, slot } = mediaPreview;
+                              const output = slot && currentRun.data ? findCompatibleWorkflowOutput(currentRun.data, graph, node.id, slot.id) : undefined;
+                              const mediaId = slot ? output?.mediaId : node.mediaId;
+                              const resourceId = slot && currentRun.data ? workflowOutputResourceNodeId(currentRun.data.run.id, node.id, slot.id) : node.id;
+                              const resource = imageResources.resources.get(resourceId);
+                              return (
+                                  <div className="h-[65vh]">
+                                      <WorkflowMediaPreview
+                                          nodeId={resourceId}
+                                          type={slot?.type || (node.type === "video_input" ? "video" : "image")}
+                                          mediaId={mediaId}
+                                          imageUrl={resource?.url}
+                                          imageStorageKey={resource?.storageKey}
+                                          imageError={imageResources.errors.get(resourceId)}
+                                      />
+                                  </div>
+                              );
+                          })()
+                        : null}
+                </Modal>
+                <Modal title="输入预览" open={Boolean(previewNodeId)} footer={null} width={760} onCancel={() => setPreviewNodeId(undefined)} destroyOnHidden>
+                    {activePreviewInputs.length ? (
+                        <div className="grid max-h-[60vh] grid-cols-2 gap-3 overflow-auto sm:grid-cols-3">
+                            {activePreviewInputs.map((input) => (
+                                <div key={input.key} className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-50 dark:border-stone-700 dark:bg-stone-900">
+                                    {input.type === "text" ? (
+                                        <div className="h-full overflow-auto whitespace-pre-wrap p-3 text-xs leading-5">{input.text || "空文本"}</div>
+                                    ) : input.mediaId ? (
+                                        <WorkflowMediaPreview
+                                            nodeId={`preview-${input.sourceNodeId}-${input.key}`}
+                                            type={input.type}
+                                            mediaId={input.mediaId}
+                                            imageUrl={input.imageUrl}
+                                            imageStorageKey={input.imageStorageKey}
+                                            imageError={input.imageError}
+                                        />
+                                    ) : (
+                                        <div className="flex h-full flex-col items-center justify-center gap-2 text-xs text-stone-400">{input.type === "image" ? <ImageIcon className="size-6" /> : <Video className="size-6" />}运行后显示</div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="py-12 text-center text-sm text-stone-500">暂无输入</div>
+                    )}
+                </Modal>
+                <Drawer title="本次运行" open={runDetailOpen} width="min(920px, 94vw)" destroyOnHidden onClose={() => setRunDetailOpen(false)}>
+                    {currentRun.isError ? (
+                        <Empty description={currentRun.error instanceof Error ? currentRun.error.message : "运行详情加载失败"}>
+                            <Button onClick={() => void currentRun.refetch()}>重新加载</Button>
+                        </Empty>
+                    ) : (
+                        <WorkflowRunDetail
+                            detail={currentRun.data}
+                            stopping={stopRun.isPending}
+                            retryingKey={retryOutput.isPending && retryOutput.variables ? workflowOutputKey(retryOutput.variables.nodeId, retryOutput.variables.slotId) : undefined}
+                            confirmingRetryKeys={
+                                new Set(
+                                    Object.values(pendingRetryRequests)
+                                        .filter((request) => request.runId === currentRun.data?.run.id)
+                                        .map((request) => workflowOutputKey(request.nodeId, request.slotId)),
+                                )
+                            }
+                            onStop={currentRun.data ? () => stopRun.mutate(currentRun.data.run.id) : undefined}
+                            onRetry={currentRun.data ? startOutputRetry : undefined}
+                        />
+                    )}
+                </Drawer>
+            </main>
         </ScopedVideoResourceProvider>
-    );
-}
-
-function ToolButton({ icon, label, onClick }: { icon: React.ReactElement; label: string; onClick: () => void }) {
-    return <Button type="text" size="small" icon={<span className="[&_svg]:size-4">{icon}</span>} onClick={onClick}>{label}</Button>;
-}
-
-function WorkflowConnections({ graph, selection, connectionStart, mouseWorld, onSelect }: { graph: WorkflowGraph; selection: Selection; connectionStart: ConnectionStart; mouseWorld: WorkflowPosition; onSelect: (identity: WorkflowConnectionIdentity) => void }) {
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const path = (from: WorkflowPosition, to: WorkflowPosition) => {
-        const distance = Math.max(80, Math.abs(to.x - from.x) * 0.5);
-        return `M ${from.x} ${from.y} C ${from.x + distance} ${from.y}, ${to.x - distance} ${to.y}, ${to.x} ${to.y}`;
-    };
-    const sourcePoint = (nodeId: string, slotId: string) => {
-        const node = graph.nodes.find((item) => item.id === nodeId);
-        if (!node) return undefined;
-        if (slotId === "output") return { x: node.position.x + (node.width || 340), y: node.position.y + (node.height || 240) / 2 };
-        const slot = node.outputs?.find((item) => item.id === slotId);
-        if (!slot) return undefined;
-        const position = slot.position || node.position;
-        return { x: position.x + (slot.width || 340), y: position.y + (slot.height || 240) / 2 };
-    };
-    return (
-        <svg className="pointer-events-none absolute left-0 top-0 h-[10000px] w-[10000px] overflow-visible">
-            {graph.nodes.flatMap((node) => (node.outputs || []).map((slot) => {
-                const position = slot.position || node.position;
-                const from = { x: node.position.x + (node.width || 360), y: node.position.y + (node.height || 260) / 2 };
-                const to = { x: position.x, y: position.y + (slot.height || 240) / 2 };
-                return <path key={`output:${workflowOutputKey(node.id, slot.id)}`} d={path(from, to)} fill="none" stroke={theme.node.muted} strokeWidth="2" strokeOpacity="0.55" strokeDasharray="6 5" pointerEvents="none" />;
-            }))}
-            {graph.connections.map((connection) => {
-                const from = sourcePoint(connection.sourceNodeId, connection.sourceSlotId);
-                const target = graph.nodes.find((node) => node.id === connection.targetNodeId);
-                if (!from || !target) return null;
-                const to = { x: target.position.x, y: target.position.y + (target.height || 260) / 2 };
-                const active = selection?.kind === "connection" && selection.targetNodeId === connection.targetNodeId && selection.targetPortId === connection.targetPortId;
-                const curve = path(from, to);
-                return (
-                    <g key={workflowConnectionKey(connection)}>
-                        <path data-workflow-object d={curve} fill="none" stroke="transparent" strokeWidth="16" style={{ cursor: "pointer", pointerEvents: "stroke" }} onClick={(event) => { event.stopPropagation(); onSelect(connection); }} />
-                        <path d={curve} fill="none" stroke={active ? theme.node.activeStroke : theme.node.muted} strokeWidth={active ? 4 : 2} pointerEvents="none" />
-                    </g>
-                );
-            })}
-            {connectionStart ? (() => { const from = sourcePoint(connectionStart.nodeId, connectionStart.slotId); return from ? <path d={path(from, mouseWorld)} fill="none" stroke={theme.node.activeStroke} strokeWidth="2" strokeDasharray="6 5" pointerEvents="none" /> : null; })() : null}
-        </svg>
     );
 }

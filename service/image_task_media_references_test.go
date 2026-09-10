@@ -3,6 +3,11 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/basketikun/infinite-canvas/model"
@@ -64,5 +69,48 @@ func TestLocalAdminMediaReferencesAllowCrossUserPrivateImages(t *testing.T) {
 	}
 	if len(references) != 1 || references[0].Name != item.Filename {
 		t.Fatalf("references = %#v, want one cross-user private reference", references)
+	}
+}
+
+type failingReferenceStore struct {
+	imageStore
+	err error
+}
+
+func (store failingReferenceStore) Get(context.Context, string) (io.ReadCloser, error) {
+	return nil, store.err
+}
+
+func TestReferenceMissingObjectFailsClearlyWithoutLeakingStorageURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		message string
+	}{
+		{"oss missing", fmt.Errorf("wrapped: %w", &oss.ServiceError{StatusCode: 404, Code: "NoSuchKey", RequestTarget: "https://secret/?Signature=secret"}), "参考图片文件不存在"},
+		{"local missing", fmt.Errorf("wrapped: %w", os.ErrNotExist), "参考图片文件不存在"},
+		{"access denied", &oss.ServiceError{StatusCode: 403, Code: "AccessDenied"}, "存储访问被拒绝"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			item := model.Media{ID: "missing-ref", OwnerUID: "owner", ObjectKey: "missing.png"}
+			_, err := readImageTaskMediaReferences(context.Background(), PortalUser{UID: "owner"}, []string{item.ID}, func(string) (model.Media, bool, error) { return item, true, nil }, func(string) (model.PublicImage, bool, error) { return model.PublicImage{}, false, nil }, failingReferenceStore{err: tc.err})
+			var safe interface{ SafeMessage() string }
+			if !errors.As(err, &safe) || !strings.Contains(safe.SafeMessage(), tc.message) || strings.Contains(err.Error(), "Signature") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestReferenceTransientStorageFailureRemainsRetryable(t *testing.T) {
+	failure := &oss.ServiceError{StatusCode: 503, Code: "ServiceUnavailable", RequestTarget: "https://secret/?Signature=secret"}
+	item := model.Media{ID: "temporary-ref", OwnerUID: "owner", ObjectKey: "image.png"}
+	_, err := readImageTaskMediaReferences(context.Background(), PortalUser{UID: "owner"}, []string{item.ID}, func(string) (model.Media, bool, error) { return item, true, nil }, func(string) (model.PublicImage, bool, error) { return model.PublicImage{}, false, nil }, failingReferenceStore{err: failure})
+	if !errors.Is(err, failure) {
+		t.Fatalf("error=%v", err)
+	}
+	if strings.Contains(taskErrorCategory(err), "secret") {
+		t.Fatal("diagnostics leaked signed URL")
 	}
 }

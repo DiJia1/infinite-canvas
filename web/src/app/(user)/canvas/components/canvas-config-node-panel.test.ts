@@ -3,6 +3,8 @@ import test from "node:test";
 import ts from "typescript";
 import { Children, isValidElement, type ReactElement, type ReactNode } from "react";
 import { sourceBehavior } from "@/test-utils/source-behavior";
+import { CanvasConfigModelSelect } from "@/components/canvas-config-model-select";
+import { CanvasSettingsSelect } from "@/components/canvas-settings-select";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { defaultConfig, reconcileProviderConfig } from "@/stores/use-config-store";
 import { buildGenerationConfig } from "../utils/canvas-generation-utils";
@@ -15,9 +17,9 @@ function elements(root: ReactNode): ReactElement<Record<string, any>>[] {
 
 test("model selector and popup stop canvas pointer events and forward the selected model", () => {
     const selected: string[] = [];
-    const Select = "model-select";
-    const component = sourceBehavior(sourceURL, { CanvasSettingsSelect: Select }).named("CanvasConfigModelSelect");
-    const root = component({ value: "a", options: [{ id: "a", name: "A" }, { id: "b", name: "B" }], onChange: (id: string) => selected.push(id) });
+    const Select = CanvasSettingsSelect;
+    const component = CanvasConfigModelSelect;
+    const root = component({ value: "a", options: [{ id: "a", name: "A" }, { id: "b", name: "B" }], onChange: (id: string) => selected.push(id) })!;
     const select = elements(root).find((node) => node.type === Select)!;
     assert.deepEqual(select.props.options, [{ value: "a", label: "A" }, { value: "b", label: "B" }]);
     select.props.onChange("b");

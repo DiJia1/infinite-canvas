@@ -307,3 +307,48 @@ func createRouteWorkflow(t *testing.T, owner, resolution string) string {
 	}
 	return workflow.ID
 }
+
+func TestWorkflowRunExpectedRevisionPreventsWrongSnapshotAndPreservesReplay(t *testing.T) {
+	restore := configureWorkflowRouteRuntime(t)
+	defer restore()
+	owner := "workflow-run-revision-" + time.Now().Format("150405.000000000")
+	seedRouteWorkflowMember(t, owner, true)
+	workflowID := createRouteWorkflow(t, owner, "1k")
+	database, _ := repository.DB()
+	if err := database.Model(&model.Workflow{}).Where("id = ?", workflowID).Update("revision", 2).Error; err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/workflows/" + workflowID + "/runs"
+	stale := workflowRequest(http.MethodPost, path, owner, `{"requestId":"revision-request","revision":1}`)
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale revision = %d/%s", stale.Code, stale.Body.String())
+	}
+	invalid := workflowRequest(http.MethodPost, path, owner, `{"requestId":"invalid-revision-request","revision":0}`)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid revision = %d/%s", invalid.Code, invalid.Body.String())
+	}
+	var count int64
+	if err := database.Model(&model.WorkflowRun{}).Where("owner_uid = ?", owner).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("rejected requests created runs: count=%d err=%v", count, err)
+	}
+	accepted := workflowRequest(http.MethodPost, path, owner, `{"requestId":"revision-request","revision":2}`)
+	var original struct {
+		Run model.WorkflowRun `json:"run"`
+	}
+	if accepted.Code != http.StatusOK || json.Unmarshal(workflowResponse(t, accepted).Data, &original) != nil || original.Run.Revision != 2 {
+		t.Fatalf("matching revision = %d/%s", accepted.Code, accepted.Body.String())
+	}
+	if err := database.Model(&model.Workflow{}).Where("id = ?", workflowID).Update("revision", 3).Error; err != nil {
+		t.Fatal(err)
+	}
+	replayed := workflowRequest(http.MethodPost, path, owner, `{"requestId":"revision-request","revision":2}`)
+	var repeated struct {
+		Run model.WorkflowRun `json:"run"`
+	}
+	if replayed.Code != http.StatusOK || json.Unmarshal(workflowResponse(t, replayed).Data, &repeated) != nil || repeated.Run.ID != original.Run.ID || repeated.Run.Revision != 2 {
+		t.Fatalf("accepted replay = %d/%s", replayed.Code, replayed.Body.String())
+	}
+	if err := database.Model(&model.WorkflowRun{}).Where("owner_uid = ?", owner).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("replay duplicated run: count=%d err=%v", count, err)
+	}
+}

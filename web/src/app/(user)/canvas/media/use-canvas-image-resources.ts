@@ -105,15 +105,14 @@ export function useCanvasImageResources({ targets, scale, resolveAccess }: { tar
     );
 
     useEffect(() => {
+        // StrictMode replays effect setup after cleanup on the same controller.
+        controller.activate();
+        return () => controller.dispose();
+    }, [controller]);
+
+    useEffect(() => {
         controller.reconcile(requests);
     }, [controller, requests]);
-
-    useEffect(
-        () => () => {
-            controller.dispose();
-        },
-        [controller],
-    );
 
     const resources = useMemo(() => controller.snapshot(), [controller, version]);
     const acknowledgeRendered = useCallback((nodeId: string, storageKey: string) => controller.acknowledgeRendered(nodeId, storageKey), [controller]);

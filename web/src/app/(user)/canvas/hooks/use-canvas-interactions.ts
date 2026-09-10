@@ -54,7 +54,8 @@ export type CanvasInteractionControllerOptions = {
     pause: () => void;
     resume: () => void;
     screenToCanvas: (clientX: number, clientY: number) => Position;
-    createNode: (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video, position: Position) => CanvasNodeData;
+    createNode?: (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video, position: Position) => CanvasNodeData;
+    normalizeConnection?: typeof normalizeConnection;
     createConnectionId?: () => string;
     onWarning?: (message: string) => void;
     requestAnimationFrame?: (callback: FrameRequestCallback) => number;
@@ -181,7 +182,7 @@ export function createCanvasInteractionController(initialOptions: CanvasInteract
                 .find(
                     (node) =>
                         node.id !== current.nodeId &&
-                        Boolean(normalizeConnection(current.nodeId, node.id, options.nodesRef.current, current.handleType)) &&
+                        Boolean((options.normalizeConnection || normalizeConnection)(current.nodeId, node.id, options.nodesRef.current, current.handleType)) &&
                         world.x >= node.position.x &&
                         world.x <= node.position.x + node.width &&
                         world.y >= node.position.y &&
@@ -192,7 +193,7 @@ export function createCanvasInteractionController(initialOptions: CanvasInteract
 
     const connectNodes = (current: ConnectionHandle, targetNodeId: string) => {
         if (current.nodeId === targetNodeId) return;
-        const connection = normalizeConnection(current.nodeId, targetNodeId, options.nodesRef.current, current.handleType);
+        const connection = (options.normalizeConnection || normalizeConnection)(current.nodeId, targetNodeId, options.nodesRef.current, current.handleType);
         if (!connection) {
             options.onWarning?.("配置节点之间不能连接");
             return;
@@ -205,8 +206,9 @@ export function createCanvasInteractionController(initialOptions: CanvasInteract
     };
 
     const createConnectedNode = (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video, pending: PendingConnectionCreate) => {
+        if (!options.createNode) return;
         const newNode = options.createNode(type, pending.position);
-        const connection = normalizeConnection(pending.connection.nodeId, newNode.id, [...options.nodesRef.current, newNode], pending.connection.handleType);
+        const connection = (options.normalizeConnection || normalizeConnection)(pending.connection.nodeId, newNode.id, [...options.nodesRef.current, newNode], pending.connection.handleType);
         if (!connection) {
             options.onWarning?.("配置节点之间不能连接");
             return;

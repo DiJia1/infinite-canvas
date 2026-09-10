@@ -1,4 +1,4 @@
-import type { WorkflowOutputExecution, WorkflowOutputSlot, WorkflowRun, WorkflowRunStatus } from "./types";
+import type { WorkflowGraph, WorkflowRunDetail, WorkflowOutputExecution, WorkflowOutputSlot, WorkflowRun, WorkflowRunStatus } from "./types";
 
 const runStatusText: Record<WorkflowRunStatus, string> = {
     pending: "等待调度",
@@ -54,4 +54,22 @@ export function latestWorkflowRun(items: WorkflowRun[] | undefined, workflowId: 
 
 export function isRetryableImageOutput(slot: WorkflowOutputSlot, output: WorkflowOutputExecution | undefined, run: WorkflowRun | undefined) {
     return slot.type === "image" && output?.status === "failed" && Boolean(run && !run.stopRequested && run.status !== "stopped");
+}
+
+
+export function findCompatibleWorkflowOutput(detail: Pick<WorkflowRunDetail, "graph" | "outputs">, graph: WorkflowGraph, nodeId: string, slotId: string) {
+    const original = detail.graph.nodes.find((node) => node.id === nodeId);
+    const current = graph.nodes.find((node) => node.id === nodeId);
+    const originalSlot = original?.outputs?.find((slot) => slot.id === slotId);
+    const currentSlot = current?.outputs?.find((slot) => slot.id === slotId);
+    if (!originalSlot || !currentSlot || original?.type !== current?.type || originalSlot.type !== currentSlot.type) return undefined;
+    return findWorkflowOutput(detail.outputs, nodeId, slotId);
+}
+
+export function workflowDownloadImageCount(detail: Pick<WorkflowRunDetail, "graph" | "outputs"> | undefined) {
+    if (!detail) return 0;
+    return detail.graph.nodes.reduce((total, node) => total + (node.outputs || []).filter((slot) => {
+        const output = findWorkflowOutput(detail.outputs, node.id, slot.id);
+        return (node.type === "image_generation" || node.type === "video_generation") && slot.type === "image" && output?.status === "succeeded" && Boolean(output.mediaId);
+    }).length, 0);
 }

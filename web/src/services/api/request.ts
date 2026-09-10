@@ -67,8 +67,9 @@ export function jsonRequestHeaders(body: unknown, token?: string) {
     };
 }
 
-export async function apiGet<T>(url: string, params?: ApiParams, token?: string) {
+export async function apiGet<T>(url: string, params?: ApiParams, token?: string, options?: { timeout?: number; signal?: AbortSignal }) {
     return apiRequest<T>({
+        ...options,
         url,
         method: "GET",
         params: params || undefined,
@@ -113,12 +114,13 @@ export async function apiPut<T>(url: string, body: unknown, token?: string, head
     });
 }
 
-async function apiRequest<T>(config: { timeout?: number; url: string; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; params?: ApiParams; data?: unknown; headers?: Record<string, string> }) {
+async function apiRequest<T>(config: { signal?: AbortSignal; timeout?: number; url: string; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; params?: ApiParams; data?: unknown; headers?: Record<string, string> }) {
     let response;
     try {
         response = await axios.request<ApiResponse<T>>({
             url: appApiPath(config.url),
             method: config.method,
+            ...(config.signal ? { signal: config.signal } : {}),
             ...(config.timeout ? { timeout: config.timeout } : {}),
             params: config.params,
             paramsSerializer: { serialize: (params) => serializeApiParams(params as ApiParams).toString() },

@@ -51,6 +51,7 @@ test("uses the workflow run contract and preserves retry request ids across tran
 
     try {
         await createWorkflowRun("workflow/1", "run-click-1");
+        await createWorkflowRun("workflow/1", "run-click-2", 7);
         await fetchWorkflowRuns(2, 20);
         await fetchWorkflowRuns(1, 1, "workflow/1");
         await fetchWorkflowRun("run/1");
@@ -65,6 +66,7 @@ test("uses the workflow run contract and preserves retry request ids across tran
             requests.map(({ url, method, params, data }) => ({ url, method, params, data })),
             [
                 { url: "/api/v1/workflows/workflow%2F1/runs", method: "POST", params: undefined, data: { requestId: "run-click-1" } },
+                { url: "/api/v1/workflows/workflow%2F1/runs", method: "POST", params: undefined, data: { requestId: "run-click-2", revision: 7 } },
                 { url: "/api/v1/workflow-runs", method: "GET", params: { page: 2, pageSize: 20 }, data: undefined },
                 { url: "/api/v1/workflow-runs", method: "GET", params: { page: 1, pageSize: 1, workflowId: "workflow/1" }, data: undefined },
                 { url: "/api/v1/workflow-runs/run%2F1", method: "GET", params: undefined, data: undefined },

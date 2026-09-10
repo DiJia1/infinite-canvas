@@ -236,3 +236,17 @@ test("reusing a node id for different media cannot display the previous resource
     assert.equal(controller.get("node-1")?.mediaId, "two");
     controller.dispose();
 });
+
+
+test("effect cleanup and reactivation can load images again", async () => {
+    const controller = createCanvasImageResourceController({ queue: createCanvasMediaLoadQueue({ concurrency: 1 }), releaseObjectURL: () => {} });
+    const req = request("thumbnail", { thumbnail: async () => image("thumbnail"), original: async () => image("original") });
+    controller.reconcile([req]);
+    controller.dispose();
+    controller.activate();
+    controller.reconcile([req]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(controller.get("node-1")?.url, "blob:thumbnail");
+    controller.dispose();
+    assert.equal(controller.snapshot().size, 0);
+});
