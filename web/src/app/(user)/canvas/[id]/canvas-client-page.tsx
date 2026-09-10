@@ -55,7 +55,7 @@ import { CanvasNodeCropDialog, type CanvasImageCropRect } from "../components/ca
 import { buildNodeGenerationContext, buildNodeGenerationInputs, hydrateNodeGenerationContext, type NodeGenerationInput } from "../components/canvas-node-generation";
 import { canSaveNodeAsAsset } from "../components/canvas-node-actions";
 import { CanvasNodeHoverToolbar } from "../components/canvas-node-hover-toolbar";
-import { InfiniteCanvas } from "../components/infinite-canvas";
+import { InfiniteCanvas, type InfiniteCanvasHandle } from "../components/infinite-canvas";
 import { Minimap } from "../components/canvas-mini-map";
 import { CanvasNode } from "../components/canvas-node";
 import { VideoResourceProvider, useExternalVideoNodes } from "../components/canvas-video-content";
@@ -69,6 +69,7 @@ import { resolveCanvasNodeMask, type CanvasMaskResources } from "../image-mask/m
 import { PRIVATE_IMAGE_DRAG_TYPE, PUBLIC_IMAGE_DRAG_TYPE, readImageDropPayload, type PrivateImageDropPayload, type PublicImageDropPayload } from "../components/material-image-drag";
 import { useCanvasStore } from "../stores/use-canvas-store";
 import { useCanvasProjectEditorLease } from "../sync/use-canvas-project-editor-lease";
+import { useCanvasDocumentSync, type CanvasEditorDocument } from "../hooks/use-canvas-document-sync";
 import { useCanvasHistory } from "../hooks/use-canvas-history";
 import { useCanvasInteractions, type PendingConnectionCreate } from "../hooks/use-canvas-interactions";
 import { useCanvasGeneration } from "../hooks/use-canvas-generation";
@@ -257,14 +258,11 @@ function InfiniteCanvasPage() {
         };
     }, []);
     const getVideoSessionScope = useCallback(() => `${videoProjectRef.current}:${videoSessionRef.current}:${useCanvasStore.getState().canonicalGeneration}`, []);
-    useCanvasProjectEditorLease(projectId);
     const containerRef = useRef<HTMLDivElement>(null);
+    const canvasRef = useRef<InfiniteCanvasHandle>(null);
     const imageInputRef = useRef<HTMLInputElement>(null);
     const uploadTargetRef = useRef<{ nodeId?: string; position?: Position } | null>(null);
     const clipboardRef = useRef<CanvasClipboard | null>(null);
-    const viewportSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const canonicalProjectSaveGenerationRef = useRef<number | null>(null);
-    const canonicalViewportSaveGenerationRef = useRef<number | null>(null);
     const didInitialCenterRef = useRef(false);
     const toolbarHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const pendingCanvasImageHydrationIdsRef = useRef<Set<string>>(new Set());
@@ -284,7 +282,6 @@ function InfiniteCanvasPage() {
     const syncScope = useCanvasStore((state) => state.syncScope);
     const createProject = useCanvasStore((state) => state.createProject);
     const openProject = useCanvasStore((state) => state.openProject);
-    const updateProject = useCanvasStore((state) => state.updateProject);
     const renameProject = useCanvasStore((state) => state.renameProject);
     const deleteProjects = useCanvasStore((state) => state.deleteProjects);
     const currentProject = useCanvasStore((state) => state.projects.find((project) => project.id === projectId));
@@ -306,6 +303,10 @@ function InfiniteCanvasPage() {
     const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
     const [projectLoaded, setProjectLoaded] = useState(false);
     const [loadedCanonicalGeneration, setLoadedCanonicalGeneration] = useState<number | null>(null);
+    const [loadedProjectId, setLoadedProjectId] = useState<string | null>(null);
+    const [loadedSyncScope, setLoadedSyncScope] = useState<string | null>(null);
+    const [documentBaseline, setDocumentBaseline] = useState<CanvasEditorDocument | null>(null);
+    const documentReady = projectLoaded && loadedProjectId === projectId && loadedSyncScope === syncScope && loadedCanonicalGeneration === canonicalGeneration;
     const [toolbarNodeId, setToolbarNodeId] = useState<string | null>(null);
     const [nodeImageSettingsOpen, setNodeImageSettingsOpen] = useState(false);
     const [dialogNodeId, setDialogNodeId] = useState<string | null>(null);
@@ -340,8 +341,8 @@ function InfiniteCanvasPage() {
     const canonicalRestore = useMemo(() => createCanvasCanonicalRestore(), []);
     const readCanonicalIdentity = useCallback(() => {
         const state = useCanvasStore.getState();
-        return state.projects.some((project) => project.id === projectId) ? { projectId, generation: state.canonicalGeneration } : null;
-    }, [projectId]);
+        return state.syncScope === syncScope && state.projects.some((project) => project.id === projectId) ? { projectId, generation: state.canonicalGeneration } : null;
+    }, [projectId, syncScope]);
 
     const refreshPrivateAssetsAfterCanvasSave = useCallback(() => {
         if (privateAssetRefreshTimerRef.current) clearTimeout(privateAssetRefreshTimerRef.current);
@@ -515,9 +516,17 @@ function InfiniteCanvasPage() {
     const { canUndo, canRedo, undo, redo, pause, resume, replaceBaseline, getRetainedHistory } = useCanvasHistory({
         snapshot: historySnapshot,
         applySnapshot: applyHistorySnapshot,
-        isReady: projectLoaded,
+        isReady: documentReady,
         isSameSnapshot: (left, right) => left.nodes === right.nodes && left.maskResources === right.maskResources && left.connections === right.connections && left.backgroundMode === right.backgroundMode && left.showImageInfo === right.showImageInfo,
     });
+
+    const editorDocument = useMemo<CanvasEditorDocument>(() => ({ nodes, connections, maskResources, backgroundMode, showImageInfo, viewport }), [nodes, connections, maskResources, backgroundMode, showImageInfo, viewport]);
+    const getLiveViewport = useCallback(() => canvasRef.current?.getViewport(), []);
+    const { pendingDocument, flushDocument, readPendingDocument } = useCanvasDocumentSync({
+        projectId, syncScope, canonicalGeneration, isReady: documentReady && !isProjectReadonly,
+        document: editorDocument, baseline: documentBaseline, getViewport: getLiveViewport,
+    });
+    useCanvasProjectEditorLease(projectId, readPendingDocument);
 
     const restoreProject = useCallback(
         (project: NonNullable<typeof currentProject>) =>
@@ -534,8 +543,7 @@ function InfiniteCanvasPage() {
                 },
                 ({ project: restoredProject, nodes: restoredNodes, pendingImageIds }) => {
                     pendingCanvasImageHydrationIdsRef.current = pendingImageIds;
-                    canonicalProjectSaveGenerationRef.current = canonicalGeneration;
-                    canonicalViewportSaveGenerationRef.current = canonicalGeneration;
+                    setDocumentBaseline({ nodes: restoredNodes, maskResources: restoredProject.maskResources, connections: restoredProject.connections, backgroundMode: restoredProject.backgroundMode, showImageInfo: restoredProject.showImageInfo || false, viewport: restoredProject.viewport });
                     setNodes(restoredNodes);
                     setMaskResources(restoredProject.maskResources);
                     setConnections(restoredProject.connections);
@@ -544,11 +552,13 @@ function InfiniteCanvasPage() {
                     setViewport(restoredProject.viewport);
                     replaceBaseline({ nodes: restoredNodes, maskResources: restoredProject.maskResources, connections: restoredProject.connections, backgroundMode: restoredProject.backgroundMode, showImageInfo: restoredProject.showImageInfo || false });
                     setLoadedCanonicalGeneration(canonicalGeneration);
+                    setLoadedProjectId(projectId);
+                    setLoadedSyncScope(syncScope);
                     setProjectLoaded(true);
                 },
                 readCanonicalIdentity,
             ),
-        [canonicalGeneration, canonicalRestore, canvasImageHydrationDependencies, projectId, readCanonicalIdentity, replaceBaseline],
+        [canonicalGeneration, canonicalRestore, canvasImageHydrationDependencies, projectId, readCanonicalIdentity, replaceBaseline, syncScope],
     );
 
     const cleanupCanvasFiles = useCallback(
@@ -573,7 +583,7 @@ function InfiniteCanvasPage() {
     }, [canonicalGeneration, canonicalRestore, hydrated, openProject, projectId, readyForCanvasMutations, restoreProject, router]);
 
     useEffect(() => {
-        if (!projectLoaded || isProjectReadonly) return;
+        if (!documentReady || isProjectReadonly) return;
         for (const node of nodes) {
             if (!isLocalImageUploadNode(node) || node.metadata?.localUploadState !== "uploading" || !node.metadata.storageKey) continue;
             if (localImageUploadController.isActive(node.id)) continue;
@@ -586,16 +596,7 @@ function InfiniteCanvasPage() {
                 .catch((error) => markLocalImageUploadFailed(node.id, error instanceof Error ? error.message : "本地图片续传失败", storageKey, scope))
                 .finally(() => resumedLocalUploadKeysRef.current.delete(resumeKey));
         }
-    }, [getVideoSessionScope, isProjectReadonly, localImageUploadController, markLocalImageUploadFailed, nodes, projectId, projectLoaded, resumeLocalImageUpload]);
-
-    useEffect(() => {
-        if (!projectLoaded || loadedCanonicalGeneration !== canonicalGeneration || isProjectReadonly) return;
-        if (canonicalProjectSaveGenerationRef.current === canonicalGeneration) {
-            canonicalProjectSaveGenerationRef.current = null;
-            return;
-        }
-        updateProject(projectId, { nodes, maskResources, connections, backgroundMode, showImageInfo });
-    }, [backgroundMode, canonicalGeneration, connections, isProjectReadonly, loadedCanonicalGeneration, maskResources, nodes, projectId, projectLoaded, showImageInfo, updateProject]);
+    }, [documentReady, getVideoSessionScope, isProjectReadonly, localImageUploadController, markLocalImageUploadFailed, nodes, projectId, resumeLocalImageUpload]);
 
     useEffect(() => {
         if (!projectLoaded || !aiStatus) return;
@@ -605,22 +606,6 @@ function InfiniteCanvasPage() {
     useEffect(() => {
         if (!dialogNodeId) setNodeImageSettingsOpen(false);
     }, [dialogNodeId]);
-
-    useEffect(() => {
-        if (!projectLoaded || loadedCanonicalGeneration !== canonicalGeneration) return;
-        if (canonicalViewportSaveGenerationRef.current === canonicalGeneration) {
-            canonicalViewportSaveGenerationRef.current = null;
-            return;
-        }
-        if (viewportSaveTimerRef.current) clearTimeout(viewportSaveTimerRef.current);
-        viewportSaveTimerRef.current = setTimeout(() => {
-            updateProject(projectId, { viewport: viewportRef.current });
-            viewportSaveTimerRef.current = null;
-        }, 500);
-        return () => {
-            if (viewportSaveTimerRef.current) clearTimeout(viewportSaveTimerRef.current);
-        };
-    }, [canonicalGeneration, loadedCanonicalGeneration, projectId, projectLoaded, updateProject, viewport]);
 
     useLayoutEffect(() => {
         nodesRef.current = nodes;
@@ -2122,6 +2107,7 @@ function InfiniteCanvasPage() {
                 <CanvasTopBar
                     title={currentProject?.title || "未命名画布"}
                     projectId={projectId}
+                    pendingDocument={pendingDocument}
                     titleDraft={titleDraft}
                     isTitleEditing={titleEditing}
                     onTitleDraftChange={setTitleDraft}
@@ -2130,7 +2116,7 @@ function InfiniteCanvasPage() {
                     onCancelTitleEditing={() => setTitleEditing(false)}
                     canUndo={canUndo}
                     canRedo={canRedo}
-                    onProjects={() => router.push(appPath("/canvas"))}
+                    onProjects={() => { flushDocument(getLiveViewport()); router.push(appPath("/canvas")); }}
                     onCreateProject={isProjectReadonly ? () => undefined : createAndOpenProject}
                     onDeleteProject={isProjectReadonly ? () => undefined : deleteCurrentProject}
                     onImportImage={isProjectReadonly ? () => undefined : () => handleUploadRequest()}
@@ -2139,6 +2125,7 @@ function InfiniteCanvasPage() {
                 />
 
                 <InfiniteCanvas
+                    ref={canvasRef}
                     containerRef={containerRef}
                     viewport={viewport}
                     cursor={cutConnectionState ? "crosshair" : undefined}
@@ -2381,6 +2368,7 @@ function InfiniteCanvasPage() {
 function CanvasTopBar({
     title,
     projectId,
+    pendingDocument,
     titleDraft,
     isTitleEditing,
     onTitleDraftChange,
@@ -2398,6 +2386,7 @@ function CanvasTopBar({
 }: {
     title: string;
     projectId: string;
+    pendingDocument: boolean;
     titleDraft: string;
     isTitleEditing: boolean;
     onTitleDraftChange: (value: string) => void;
@@ -2476,7 +2465,7 @@ function CanvasTopBar({
                             </button>
                         )}
                         <CanvasBootstrapFeedback />
-                        <CanvasSyncFeedback projectId={projectId} />
+                        <CanvasSyncFeedback projectId={projectId} pendingDocument={pendingDocument} />
                     </div>
                 </div>
             </div>

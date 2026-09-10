@@ -57,7 +57,7 @@ test("Undo can resume the same local image after its previous upload finished", 
     let uploads = 0;
     let active = false;
     const runEffect = sourceBehavior(new URL("./canvas-client-page.tsx", import.meta.url), {
-        projectLoaded: true, isProjectReadonly: false, nodes: [node], isLocalImageUploadNode,
+        documentReady: true, isProjectReadonly: false, nodes: [node], isLocalImageUploadNode,
         localImageUploadController: { isActive: () => active },
         getVideoSessionScope: () => "scope", resumedLocalUploadKeysRef: { current: new Set<string>() },
         resumeLocalImageUpload: async () => { uploads++; active = true; },

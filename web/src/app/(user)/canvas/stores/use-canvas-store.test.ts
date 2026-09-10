@@ -875,3 +875,46 @@ test("deletes a remotely accepted create when the create response is lost after 
     assert.equal(store.getState().openProject(id), null);
     assert.equal(store.getState().projectSync[id], undefined);
 });
+
+test("an older document acknowledgement stays pending until the latest nodes, edges and viewport are confirmed", async () => {
+    const acknowledgements = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const started = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const saved: CanvasProjectRecord[] = [];
+    let request = 0;
+    const { api } = apiDouble({ update: async (id, input) => {
+        const index = request++;
+        started[index].resolve();
+        await acknowledgements[index].promise;
+        const record = serverProject({ id, title: input.title, document: input.document, revision: input.revision + 1 });
+        saved.push(record);
+        return record;
+    } });
+    const store = createCanvasStore({ api, serverDebounceMs: 10, isOnline: () => true });
+    store.getState().replaceProjectsFromServer([serverProject()]);
+    store.getState().startSync("portal-user");
+    const { CanvasNodeType } = await import("../types");
+    const a = { id: "A", type: CanvasNodeType.Text, title: "A", width: 100, height: 100, position: { x: 0, y: 0 }, metadata: { content: "A" } };
+    const b = { ...a, id: "B" };
+    const latest = { nodes: [a, b], connections: [{ id: "AB", fromNodeId: "A", toNodeId: "B" }], maskResources: {}, backgroundMode: "lines" as const, showImageInfo: true, viewport: { x: 32, y: 57, k: 1.58 } };
+    try {
+        store.getState().updateProject("project-1", { nodes: [a] });
+        await started[0].promise;
+        store.getState().updateProject("project-1", latest);
+        acknowledgements[0].resolve();
+        await started[1].promise;
+        const metadata = store.getState().projectSync["project-1"];
+        assert.ok(metadata.dirty || metadata.pending || metadata.saving, "old acknowledgement must never mark the new document clean");
+        assert.deepEqual(store.getState().projects[0].nodes, latest.nodes);
+        acknowledgements[1].resolve();
+        await waitForDebounce();
+        assert.equal(store.getState().projectSync["project-1"].saving, false);
+        assert.equal(store.getState().projectSync["project-1"].dirty, false);
+        const { maskResources: _emptyMasks, ...expectedServerDocument } = latest;
+        assert.deepEqual(saved[1].document, expectedServerDocument);
+        const reopened = createCanvasStore({ api, isOnline: () => true });
+        reopened.getState().replaceProjectsFromServer([saved[1]]);
+        assert.deepEqual(reopened.getState().projects[0].nodes, latest.nodes);
+        assert.deepEqual(reopened.getState().projects[0].connections, latest.connections);
+        assert.deepEqual(reopened.getState().projects[0].viewport, latest.viewport);
+    } finally { acknowledgements.forEach((ack) => ack.resolve()); }
+});

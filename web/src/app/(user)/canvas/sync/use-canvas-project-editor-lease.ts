@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 
+import type { CanvasEditorDocument } from "../hooks/use-canvas-document-sync";
 import { useCanvasStore } from "../stores/use-canvas-store";
 import { canvasProjectEditorLeaseKey, claimCanvasProjectEditorLease, readCanvasProjectEditorLease } from "./canvas-project-editor-lease";
 import { cleanupExpiredCanvasProjectRecoverySnapshots, saveCanvasProjectRecoverySnapshot } from "./canvas-project-recovery-snapshot";
@@ -28,7 +29,9 @@ function browserLocks(): WebLockManager | null {
     return locks && typeof locks.request === "function" ? locks : null;
 }
 
-export function useCanvasProjectEditorLease(projectId: string) {
+export function useCanvasProjectEditorLease(projectId: string, readPendingDocument?: () => CanvasEditorDocument | null) {
+    const readPendingDocumentRef = useRef(readPendingDocument);
+    useLayoutEffect(() => { readPendingDocumentRef.current = readPendingDocument; }, [readPendingDocument]);
     const setProjectSyncBlocked = useCanvasStore((state) => state.setProjectSyncBlocked);
     const refreshProjectFromServer = useCanvasStore((state) => state.refreshProjectFromServer);
     const readyForCanvasMutations = useCanvasStore((state) => state.readyForCanvasMutations);
@@ -58,8 +61,11 @@ export function useCanvasProjectEditorLease(projectId: string) {
             const state = useCanvasStore.getState();
             const project = state.projects.find((item) => item.id === projectId);
             const sync = state.projectSync[projectId];
-            if (!project || !sync || (!sync.dirty && !sync.pending && !sync.saving && !sync.conflict)) return;
-            void saveCanvasProjectRecoverySnapshot(projectId, tabId, project)
+            const pendingDocument = readPendingDocumentRef.current?.();
+            if (!project || (!pendingDocument && (!sync || (!sync.dirty && !sync.pending && !sync.saving && !sync.conflict)))) return;
+            // Recovery must include edits still in the editor even if a 409 or lease
+            // takeover already forbids publishing them to the shared Store.
+            void saveCanvasProjectRecoverySnapshot(projectId, tabId, pendingDocument ? { ...project, ...pendingDocument } : project)
                 .then(() => cleanupExpiredCanvasProjectRecoverySnapshots())
                 .catch(() => undefined);
         };

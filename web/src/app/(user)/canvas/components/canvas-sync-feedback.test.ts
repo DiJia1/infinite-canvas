@@ -39,3 +39,11 @@ test("describes authenticated bootstrap errors separately from offline and hides
     assert.equal(describeCanvasBootstrap("error", "guest", "不应显示"), null);
     assert.equal(describeCanvasBootstrap("error", null, "不应显示"), null);
 });
+
+test("an unsubmitted editor document cannot be shown as saved when an older request succeeds", () => {
+    assert.equal(describeCanvasSync(sync(), false, true).kind, "saving");
+    assert.equal(describeCanvasSync(sync({ offline: true }), false, true).kind, "offline");
+    assert.equal(describeCanvasSync(sync({ conflict: true }), false, true).kind, "conflict");
+    assert.equal(describeCanvasSync(sync({ error: "保存失败" }), false, true).kind, "error");
+    assert.equal(describeCanvasSync(sync(), true, true).kind, "blocked");
+});

@@ -15,12 +15,12 @@ export type CanvasSyncDescription = {
 
 const canvasDocumentTooLargeMessage = "画板数据超过保存上限（4MB）";
 
-export function describeCanvasSync(sync: CanvasProjectSync, blocked = false): CanvasSyncDescription {
+export function describeCanvasSync(sync: CanvasProjectSync, blocked = false, pendingDocument = false): CanvasSyncDescription {
     if (blocked) return { label: "另一标签页正在编辑", kind: "blocked", presentation: "tag", refreshable: false };
     if (sync.conflict) return { label: "版本冲突", kind: "conflict", presentation: "tag", refreshable: true };
     if (sync.error) return { label: sync.error.includes(canvasDocumentTooLargeMessage) ? canvasDocumentTooLargeMessage : "保存失败", kind: "error", presentation: "tag", refreshable: false };
-    if (sync.offline && (sync.dirty || sync.pending)) return { label: "离线待同步", kind: "offline", presentation: "tag", refreshable: false };
-    if (sync.saving || sync.dirty || sync.pending) return { label: "保存中", kind: "saving", presentation: "icon", refreshable: false };
+    if (sync.offline && (sync.dirty || sync.pending || pendingDocument)) return { label: "离线待同步", kind: "offline", presentation: "tag", refreshable: false };
+    if (sync.saving || sync.dirty || sync.pending || pendingDocument) return { label: "保存中", kind: "saving", presentation: "icon", refreshable: false };
     return { label: "已保存", kind: "saved", presentation: "icon", refreshable: false };
 }
 
@@ -80,7 +80,7 @@ export function CanvasBootstrapFeedback() {
     );
 }
 
-export function CanvasSyncFeedback({ projectId }: { projectId: string }) {
+export function CanvasSyncFeedback({ projectId, pendingDocument = false }: { projectId: string; pendingDocument?: boolean }) {
     const syncEnabled = useCanvasStore((state) => state.syncEnabled);
     const sync = useCanvasStore((state) => state.projectSync[projectId]);
     const blocked = useCanvasStore((state) => Boolean(state.blockedProjectSync[projectId]));
@@ -88,7 +88,7 @@ export function CanvasSyncFeedback({ projectId }: { projectId: string }) {
     const [refreshing, setRefreshing] = useState(false);
 
     if (!syncEnabled || !sync) return null;
-    const description = describeCanvasSync(sync, blocked);
+    const description = describeCanvasSync(sync, blocked, pendingDocument);
     const appearance = syncAppearance[description.kind];
 
     const refresh = async () => {

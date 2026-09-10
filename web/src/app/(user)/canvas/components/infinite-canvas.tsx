@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -9,6 +9,7 @@ import { createCanvasViewportCommitScheduler } from "../utils/canvas-viewport-co
 import { CanvasViewportDebugOverlay } from "./canvas-viewport-debug-overlay";
 
 type InfiniteCanvasProps = {
+    ref?: React.Ref<InfiniteCanvasHandle>;
     containerRef: React.RefObject<HTMLDivElement | null>;
     viewport: ViewportTransform;
     cursor?: React.CSSProperties["cursor"];
@@ -20,6 +21,10 @@ type InfiniteCanvasProps = {
     onDrop?: (event: React.DragEvent<HTMLDivElement>) => void;
     debugSelectedNode?: CanvasNodeData | null;
     children: React.ReactNode;
+};
+
+export type InfiniteCanvasHandle = {
+    getViewport: () => ViewportTransform;
 };
 
 export type CanvasPanState = {
@@ -38,7 +43,7 @@ export function finishCanvasPan(state: CanvasPanState, onCanvasDeselect?: () => 
     return true;
 }
 
-export function InfiniteCanvas({ containerRef, viewport, cursor, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onContextMenu, onDrop, debugSelectedNode, children }: InfiniteCanvasProps) {
+export function InfiniteCanvas({ ref, containerRef, viewport, cursor, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onContextMenu, onDrop, debugSelectedNode, children }: InfiniteCanvasProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const panState = useRef<CanvasPanState>({
         isPanning: false,
@@ -61,6 +66,11 @@ export function InfiniteCanvas({ containerRef, viewport, cursor, backgroundMode 
     const isViewportManipulatingRef = useRef(false);
     const viewportCommitSchedulerRef = useRef<ReturnType<typeof createCanvasViewportCommitScheduler> | null>(null);
     const [isSpacePressed, setIsSpacePressed] = useState(false);
+
+    // Include the last gesture even when its animation frame or React commit is pending.
+    useImperativeHandle(ref, () => ({
+        getViewport: () => nextWheelViewportRef.current || nextViewportRef.current || viewportRef.current,
+    }), []);
 
     onViewportChangeRef.current = onViewportChange;
     if (!viewportCommitSchedulerRef.current) {
