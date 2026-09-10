@@ -4,11 +4,12 @@ import test from "node:test";
 
 const sourceURL = new URL("./app-top-nav.tsx", import.meta.url);
 
-test("top navigation returns to the Portal workbench and shows the directory name", async () => {
+test("top navigation uses the route home target and label and shows the directory name", async () => {
     const source = await readFile(sourceURL, "utf8");
 
-    assert.match(source, /href="\/"/);
-    assert.match(source, />\s*返回工作台\s*</);
+    assert.match(source, /const \{ section, home \} = useNavigationRoute\(\)/);
+    assert.match(source, /href=\{home\.href\}/);
+    assert.match(source, />\s*\{home\.label\}\s*</);
     assert.doesNotMatch(source, /appPath\("\/logo\.svg"\)/);
     assert.match(source, /session\.data\?\.user\.displayName/);
 });
